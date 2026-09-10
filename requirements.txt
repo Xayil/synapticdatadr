@@ -1,0 +1,8 @@
+pandas
+pyarrow
+dtale
+streamlit
+plotly
+scikit-learn
+xgboost
+pyreadr
