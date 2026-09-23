@@ -11,7 +11,7 @@ import dtale
 import dtale.global_state as global_state
 from flask import Response, jsonify, request, send_file
 
-from plots import ZONA_STRIKE, serie_zona
+from plots import construir_grafica
 
 COLUMNAS_COMPARTIDAS = [
     "PitchUID",
@@ -20,6 +20,14 @@ COLUMNAS_COMPARTIDAS = [
     "PlateLocSide",
     "PlateLocHeight",
     "game_anon_id",
+    "HorzBreak",
+    "InducedVertBreak",
+    "RelSpeed",
+    "SpinRate",
+    "RelSide",
+    "RelHeight",
+    "PitchCall",
+    "hit_type",
 ]
 
 _rutas_listas = False
@@ -124,25 +132,17 @@ def leer_filtros(data_id):
 
 
 def datos_vista(data_id):
+    grafica = request.args.get("grafica") or "zona"
     try:
         filtros, consulta = leer_filtros(data_id)
         df = _dataframe_visible(data_id)
-        paquete = serie_zona(df)
+        paquete = construir_grafica(df, grafica)
         firma = hashlib.sha1(
-            f"{consulta}|{paquete['total']}|{len(filtros)}".encode("utf-8")
+            f"{paquete['id']}|{consulta}|{paquete['total']}|{len(filtros)}".encode("utf-8")
         ).hexdigest()
-        return jsonify(
-            ok=True,
-            filtros=filtros,
-            total=paquete["total"],
-            mostrados=paquete["mostrados"],
-            muestra=paquete["muestra"],
-            series=paquete["series"],
-            firma=firma,
-            zona=ZONA_STRIKE,
-        )
+        return jsonify(ok=True, filtros=filtros, firma=firma, **paquete)
     except Exception as exc:
-        return jsonify(ok=False, error=str(exc), filtros=[], series=[], total=0)
+        return jsonify(ok=False, error=str(exc), filtros=[], series=[], graficas=[], total=0)
 
 
 def _consulta_por_ids(ids):
@@ -218,7 +218,7 @@ def pagina_vista(data_id):
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>Datos y zona de strike</title>
+  <title>Datos, filtros y gráficas</title>
   <script src="/dtale/vista-plotly.js"></script>
   <style>
     html, body {{
@@ -298,6 +298,24 @@ def pagina_vista(data_id):
       font-size: 13px;
       color: #d0d0d0;
     }}
+    #graficas {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 8px 12px 0;
+    }}
+    #graficas button {{
+      background: #243140;
+      font-size: 12px;
+    }}
+    #graficas button.activa {{
+      background: #1abc9c;
+      color: #102027;
+    }}
+    #graficas button:disabled {{
+      opacity: 0.35;
+      cursor: default;
+    }}
     #grafico {{
       flex: 1;
       min-height: 420px;
@@ -307,8 +325,8 @@ def pagina_vista(data_id):
 </head>
 <body>
   <header>
-    <h1>Tabla, filtros y zona de strike</h1>
-    <p>Filtra en la tabla de D-Tale: el gráfico usa esas mismas filas. En el gráfico, recuadra lanzamientos para dejar solo esos en la tabla.</p>
+    <h1>Tabla, filtros y gráficas</h1>
+    <p>Elige el tipo de gráfica en los botones. Los filtros de la tabla se aplican a todas. En un mapa de puntos, recuadra lanzamientos para dejar solo esos en la tabla.</p>
   </header>
   <div class="barra">
     <ul id="filtros"><li>Leyendo filtros…</li></ul>
@@ -317,6 +335,7 @@ def pagina_vista(data_id):
   <div class="layout">
     <iframe id="tabla" title="Tabla D-Tale" src="/dtale/main/{data_id}"></iframe>
     <div id="panel">
+      <div id="graficas"></div>
       <div id="estado"></div>
       <div id="grafico"></div>
     </div>
@@ -327,6 +346,9 @@ def pagina_vista(data_id):
     const lista = document.getElementById("filtros");
     const estado = document.getElementById("estado");
     let firma = null;
+    let graficaActual = "zona";
+    let menuFirma = "";
+    let modoActual = "scatter";
     let aplicando = false;
     let ignorarSeleccion = false;
 
@@ -355,40 +377,84 @@ def pagina_vista(data_id):
       }});
     }}
 
+    function pintarMenu(data) {{
+      const firmaMenu = (data.graficas || []).map((g) => g.id + (g.disponible ? "1" : "0")).join("|");
+      if (firmaMenu === menuFirma && document.getElementById("graficas").childElementCount) return;
+      menuFirma = firmaMenu;
+      const caja = document.getElementById("graficas");
+      caja.replaceChildren();
+      (data.graficas || []).forEach((opcion) => {{
+        const boton = document.createElement("button");
+        boton.type = "button";
+        boton.className = "grafica" + (opcion.id === graficaActual ? " activa" : "");
+        boton.textContent = opcion.nombre;
+        boton.disabled = !opcion.disponible;
+        boton.title = opcion.disponible ? opcion.nombre : opcion.motivo;
+        boton.addEventListener("click", () => {{
+          graficaActual = opcion.id;
+          firma = null;
+          menuFirma = "";
+          actualizar();
+        }});
+        caja.appendChild(boton);
+      }});
+    }}
+
     function dibujar(data) {{
-      const trazas = (data.series || []).map((serie) => ({{
-        x: serie.x,
-        y: serie.y,
-        customdata: serie.id,
-        mode: "markers",
-        type: "scatter",
-        name: serie.tipo,
-        marker: {{ size: 9, opacity: 0.85, color: serie.color }},
-        hovertemplate: "<b>%{{fullData.name}}</b><br>ID: %{{customdata}}<br>X: %{{x:.2f}} ft<br>Z: %{{y:.2f}} ft<extra></extra>"
-      }}));
-      const zona = data.zona || {{ x0: -0.83, x1: 0.83, y0: 1.5, y1: 3.5 }};
+      modoActual = data.modo || "scatter";
+      const ejes = data.ejes || {{}};
+      const esBarra = modoActual === "bar";
+      let trazas;
+      if (esBarra) {{
+        const serie = (data.series || [])[0] || {{ x: [], y: [], color: [] }};
+        trazas = [{{
+          type: "bar",
+          x: serie.x,
+          y: serie.y,
+          marker: {{ color: serie.color }},
+          hovertemplate: "<b>%{{x}}</b><br>Lanzamientos: %{{y}}<extra></extra>"
+        }}];
+      }} else {{
+        trazas = (data.series || []).map((serie) => ({{
+          x: serie.x,
+          y: serie.y,
+          customdata: serie.id,
+          mode: "markers",
+          type: "scatter",
+          name: serie.tipo,
+          marker: {{ size: 9, opacity: 0.85, color: serie.color }},
+          hovertemplate: "<b>%{{fullData.name}}</b><br>ID: %{{customdata}}<br>X: %{{x:.2f}}<br>Y: %{{y:.2f}}<extra></extra>"
+        }}));
+      }}
+      const xaxis = {{ title: ejes.x || "", zeroline: false, automargin: true }};
+      const yaxis = {{ title: ejes.y || "", zeroline: false, automargin: true }};
+      if (ejes.x_rango) xaxis.range = ejes.x_rango;
+      if (ejes.y_rango) yaxis.range = ejes.y_rango;
+      if (esBarra) xaxis.tickangle = -35;
       const layout = {{
         paper_bgcolor: "#111111",
         plot_bgcolor: "#1a1a1a",
         font: {{ color: "#f2f2f2" }},
-        xaxis: {{ title: "Ubicación horizontal (ft)", range: [-2.5, 2.5], zeroline: false }},
-        yaxis: {{ title: "Ubicación vertical (ft)", range: [0, 5], zeroline: false }},
-        shapes: [{{
+        title: data.titulo || "",
+        xaxis: xaxis,
+        yaxis: yaxis,
+        shapes: data.forma === "zona" ? [{{
           type: "rect",
-          x0: zona.x0, x1: zona.x1, y0: zona.y0, y1: zona.y1,
+          x0: -0.83, x1: 0.83, y0: 1.5, y1: 3.5,
           line: {{ color: "white", width: 2, dash: "dash" }},
           fillcolor: "rgba(255,255,255,0.05)"
-        }}],
+        }}] : [],
         legend: {{ title: {{ text: "Tipo de lanzamiento" }} }},
-        margin: {{ t: 24, r: 16, b: 48, l: 52 }},
-        dragmode: "select",
+        showlegend: !esBarra,
+        margin: {{ t: 36, r: 16, b: 72, l: 56 }},
+        dragmode: esBarra ? false : "select",
         uirevision: data.firma
       }};
       ignorarSeleccion = true;
       Plotly.react(grafico, trazas, layout, {{ responsive: true, displaylogo: false }});
       if (!grafico.dataset.seleccion) {{
         grafico.on("plotly_selected", (evento) => {{
-          if (ignorarSeleccion || !evento || !evento.points || !evento.points.length) return;
+          if (modoActual === "bar" || ignorarSeleccion || !evento || !evento.points || !evento.points.length) return;
           const ids = [...new Set(evento.points.map(idDe))];
           enviarSeleccion(ids);
         }});
@@ -400,7 +466,7 @@ def pagina_vista(data_id):
     async function actualizar() {{
       if (aplicando) return;
       try {{
-        const respuesta = await fetch("/dtale/vista-datos/" + DATA_ID, {{ cache: "no-store" }});
+        const respuesta = await fetch("/dtale/vista-datos/" + DATA_ID + "?grafica=" + graficaActual, {{ cache: "no-store" }});
         const data = await respuesta.json();
         if (!data.ok) {{
           estado.innerHTML = "";
@@ -414,8 +480,9 @@ def pagina_vista(data_id):
         if (data.muestra) {{
           texto += " Se dibujan " + data.mostrados + " para mantener el gráfico ligero.";
         }}
-        estado.textContent = texto;
+        estado.textContent = (data.titulo ? data.titulo + ". " : "") + texto;
         pintarFiltros(data);
+        pintarMenu(data);
         if (data.firma !== firma) {{
           firma = data.firma;
           dibujar(data);

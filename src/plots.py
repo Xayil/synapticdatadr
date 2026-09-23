@@ -46,6 +46,199 @@ def color_de(tipo: str) -> str:
     return PALETA_EXTRA[sum(ord(c) for c in tipo) % len(PALETA_EXTRA)]
 
 
+GRAFICAS = [
+    {
+        "id": "zona",
+        "nombre": "Zona de strike",
+        "modo": "scatter",
+        "forma": "zona",
+        "x": ["PlateLocSide", "plate_x"],
+        "y": ["PlateLocHeight", "plate_z"],
+        "x_titulo": "Ubicación horizontal (ft)",
+        "y_titulo": "Ubicación vertical (ft)",
+        "x_rango": [-2.5, 2.5],
+        "y_rango": [0, 5],
+    },
+    {
+        "id": "movimiento",
+        "nombre": "Movimiento",
+        "modo": "scatter",
+        "x": ["HorzBreak"],
+        "y": ["InducedVertBreak"],
+        "x_titulo": "Movimiento horizontal (in)",
+        "y_titulo": "Movimiento vertical inducido (in)",
+    },
+    {
+        "id": "velocidad",
+        "nombre": "Velocidad y spin",
+        "modo": "scatter",
+        "x": ["RelSpeed"],
+        "y": ["SpinRate"],
+        "x_titulo": "Velocidad de salida (mph)",
+        "y_titulo": "Spin rate (rpm)",
+    },
+    {
+        "id": "liberacion",
+        "nombre": "Punto de liberación",
+        "modo": "scatter",
+        "x": ["RelSide"],
+        "y": ["RelHeight"],
+        "x_titulo": "Liberación lateral (ft)",
+        "y_titulo": "Altura de liberación (ft)",
+    },
+    {
+        "id": "tipos",
+        "nombre": "Conteo por tipo",
+        "modo": "bar",
+        "categoria": ["AutoPitchType", "TaggedPitchType", "pitch_type"],
+        "x_titulo": "Tipo de lanzamiento",
+        "y_titulo": "Lanzamientos",
+    },
+    {
+        "id": "resultado",
+        "nombre": "Resultado del pitcheo",
+        "modo": "bar",
+        "categoria": ["PitchCall"],
+        "x_titulo": "Resultado",
+        "y_titulo": "Lanzamientos",
+    },
+    {
+        "id": "bateo",
+        "nombre": "Tipo de batazo",
+        "modo": "bar",
+        "categoria": ["hit_type"],
+        "x_titulo": "Tipo de bola bateada",
+        "y_titulo": "Lanzamientos",
+    },
+]
+
+
+def _primera(df: pd.DataFrame, nombres) -> str | None:
+    for nombre in nombres:
+        if nombre in df.columns:
+            return nombre
+    return None
+
+
+def _ids(grupo: pd.DataFrame, columna_id: str | None) -> list:
+    if columna_id:
+        return grupo[columna_id].astype(str).tolist()
+    return [str(i) for i in grupo.index]
+
+
+def _dispersion(df: pd.DataFrame, spec: dict, max_puntos: int = 8000) -> dict:
+    x_col = _primera(df, spec["x"])
+    y_col = _primera(df, spec["y"])
+    if not x_col or not y_col:
+        faltan = ", ".join(spec["x"][:1] + spec["y"][:1])
+        raise ValueError(f"Faltan columnas para esta gráfica: {faltan}.")
+
+    datos = df.dropna(subset=[x_col, y_col]).copy()
+    total = int(len(datos))
+    muestra = False
+    if total > max_puntos:
+        datos = datos.sample(max_puntos, random_state=0)
+        muestra = True
+
+    tipo_col = _primera(datos, ["AutoPitchType", "TaggedPitchType", "pitch_type"])
+    id_col = _primera(datos, ["PitchUID", "pitch_uid"])
+    if tipo_col:
+        datos["_tipo_grafico"] = datos[tipo_col].astype(str)
+        grupos = datos.groupby("_tipo_grafico", sort=False)
+    else:
+        grupos = [("Lanzamientos", datos)]
+
+    series = []
+    for tipo, grupo in grupos:
+        tipo = str(tipo)
+        series.append(
+            {
+                "tipo": tipo,
+                "color": color_de(tipo),
+                "x": [round(float(v), 4) for v in grupo[x_col]],
+                "y": [round(float(v), 4) for v in grupo[y_col]],
+                "id": _ids(grupo, id_col),
+            }
+        )
+
+    return {
+        "modo": "scatter",
+        "series": series,
+        "total": total,
+        "mostrados": int(len(datos)),
+        "muestra": muestra,
+    }
+
+
+def _barras(df: pd.DataFrame, spec: dict) -> dict:
+    col = _primera(df, spec["categoria"])
+    if not col:
+        raise ValueError(f"Falta la columna {spec['categoria'][0]} para esta gráfica.")
+
+    conteo = df[col].dropna().astype(str)
+    conteo = conteo[conteo.str.lower() != "nan"].value_counts()
+    return {
+        "modo": "bar",
+        "series": [
+            {
+                "tipo": spec["nombre"],
+                "x": conteo.index.tolist(),
+                "y": [int(v) for v in conteo.values],
+                "color": [color_de(str(nombre)) for nombre in conteo.index],
+                "id": [],
+            }
+        ],
+        "total": int(conteo.sum()),
+        "mostrados": int(conteo.sum()),
+        "muestra": False,
+    }
+
+
+def graficas_disponibles(df: pd.DataFrame) -> list:
+    opciones = []
+    for spec in GRAFICAS:
+        if spec["modo"] == "bar":
+            lista = _primera(df, spec["categoria"]) is not None
+            faltan = spec["categoria"][0]
+        else:
+            lista = _primera(df, spec["x"]) is not None and _primera(df, spec["y"]) is not None
+            faltan = f"{spec['x'][0]} y {spec['y'][0]}"
+        opciones.append(
+            {
+                "id": spec["id"],
+                "nombre": spec["nombre"],
+                "disponible": lista,
+                "motivo": "" if lista else f"Faltan {faltan}",
+            }
+        )
+    return opciones
+
+
+def construir_grafica(df: pd.DataFrame, grafica_id: str = "zona") -> dict:
+    """Arma una gráfica distinta según el id, siempre con el dataframe ya filtrado."""
+    spec = next((g for g in GRAFICAS if g["id"] == grafica_id), GRAFICAS[0])
+    if spec["modo"] == "bar":
+        paquete = _barras(df, spec)
+    else:
+        paquete = _dispersion(df, spec)
+
+    paquete.update(
+        {
+            "id": spec["id"],
+            "titulo": spec["nombre"],
+            "forma": spec.get("forma"),
+            "ejes": {
+                "x": spec["x_titulo"],
+                "y": spec["y_titulo"],
+                "x_rango": spec.get("x_rango"),
+                "y_rango": spec.get("y_rango"),
+            },
+            "graficas": graficas_disponibles(df),
+        }
+    )
+    return paquete
+
+
 def serie_zona(df: pd.DataFrame, max_puntos: int = 8000) -> dict:
     """
     Arma las series de la zona de strike a partir del dataframe ya filtrado.
