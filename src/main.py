@@ -106,7 +106,6 @@ def main():
         elif opc_var == "16":
             break
 
-    # Filtrar subset de datos
     df_partido = df[df['game_anon_id'].isin(partidos_sel)].copy()
 
     # =========================

@@ -1,6 +1,3 @@
-# src/vista.py
-"""Vista compartida: la tabla de D-Tale y la zona de strike de Plotly usan los mismos filtros."""
-
 import hashlib
 import json
 import os
