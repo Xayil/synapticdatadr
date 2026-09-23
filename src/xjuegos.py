@@ -2,9 +2,7 @@
 # Para guardar necesito el command + S
 
 
-# Esto sirve para abrir los datos seleccionados en una interfaz visual
-import dtale
-
+# Esto sirve para cargar y consultar los partidos
 import pandas as pd
 
 # Esto sirve para cargar la base de datos del archivo Parquet
@@ -1575,7 +1573,7 @@ def revisar_seleccion(partidos_seleccionados, campos_seleccionados):
         print(f"- {nombre_amigable}")
 
     # Esto sirve para mostrar las opciones disponibles después de revisar la selección
-    print("\n1. Abrir visualización")
+    print("\n1. Abrir tabla, filtros y zona de strike")
     print("2. Cambiar partidos")
     print("3. Cambiar variables")
     print("4. Cancelar")
@@ -1585,83 +1583,77 @@ def revisar_seleccion(partidos_seleccionados, campos_seleccionados):
 
     return opcion
 
-# Esto sirve para iniciar el programa y conectar la selección de partidos con la selección de variables
-partidos_seleccionados = seleccionar_partidos()
-
-# Esto sirve para continuar con la selección de variables después de elegir los partidos
-campos_seleccionados = seleccionar_variables()
-
-# Esto sirve para guardar la opción seleccionada en la pantalla de revisión
-opcion_revision = revisar_seleccion(partidos_seleccionados, campos_seleccionados)
-
-# Esto sirve para cambiar los partidos si el analista eligió la opción 2
-if opcion_revision == "2":
-
+def iniciar():
+    # Esto sirve para iniciar el programa y conectar la selección de partidos con la selección de variables
     partidos_seleccionados = seleccionar_partidos()
 
-    print("\nNueva selección de partidos:")
-    print(partidos_seleccionados)
-# Esto sirve para cambiar las variables si el analista eligió la opción 3
-elif opcion_revision == "3":
-
+    # Esto sirve para continuar con la selección de variables después de elegir los partidos
     campos_seleccionados = seleccionar_variables()
 
-    print("\nNueva selección de variables:")
+    # Esto sirve para guardar la opción seleccionada en la pantalla de revisión
+    opcion_revision = revisar_seleccion(partidos_seleccionados, campos_seleccionados)
 
-    # Esto sirve para mostrar los nombres de las nuevas variables seleccionadas
-    for campo in campos_seleccionados:
-        nombre_amigable = diccionario_campos[campo]["nombre"]
-        print(f"- {nombre_amigable}")
+    # Esto sirve para cambiar los partidos si el analista eligió la opción 2
+    if opcion_revision == "2":
 
-# Esto sirve para cancelar la consulta y terminar el programa
-elif opcion_revision == "4":
+        partidos_seleccionados = seleccionar_partidos()
 
-    print("\nConsulta cancelada.")
+        print("\nNueva selección de partidos:")
+        print(partidos_seleccionados)
+    # Esto sirve para cambiar las variables si el analista eligió la opción 3
+    elif opcion_revision == "3":
 
-# Esto sirve para preparar los datos cuando el analista elige abrir la visualización
-elif opcion_revision == "1":
+        campos_seleccionados = seleccionar_variables()
 
-    # Esto sirve para convertir los números de los partidos seleccionados en sus IDs originales
-    ids_partidos_seleccionados = [
-        numero_a_id[numero]
-        for numero in partidos_seleccionados
-        if numero in numero_a_id
-    ]
+        print("\nNueva selección de variables:")
 
-    # Esto sirve para conservar únicamente los registros de los partidos seleccionados
-    df_partidos = df[
-        df["game_anon_id"].isin(ids_partidos_seleccionados)
-    ]
+        # Esto sirve para mostrar los nombres de las nuevas variables seleccionadas
+        for campo in campos_seleccionados:
+            nombre_amigable = diccionario_campos[campo]["nombre"]
+            print(f"- {nombre_amigable}")
 
-    # Esto sirve para conservar únicamente las variables seleccionadas y reiniciar el índice de los resultados
-    df_filtrado = df_partidos[campos_seleccionados].reset_index(drop=True)
+    # Esto sirve para cancelar la consulta y terminar el programa
+    elif opcion_revision == "4":
 
-    # Esto sirve para comprobar qué columnas quedaron en la consulta
-    print("\nColumnas seleccionadas:")
-    print(df_filtrado.columns.tolist())
+        print("\nConsulta cancelada.")
 
-    # Esto sirve para comprobar el tamaño final de la consulta
-    print("Tamaño final:", df_filtrado.shape)
+    # Esto sirve para preparar los datos cuando el analista elige abrir la visualización
+    elif opcion_revision == "1":
 
-    # Esto sirve para comprobar qué partidos se utilizarán en la consulta
-    print("\nPartidos seleccionados:", partidos_seleccionados)
-    print("IDs correspondientes:", ids_partidos_seleccionados)
+        # Esto sirve para convertir los números de los partidos seleccionados en sus IDs originales
+        ids_partidos_seleccionados = [
+            numero_a_id[numero]
+            for numero in partidos_seleccionados
+            if numero in numero_a_id
+        ]
 
-    # Esto sirve para comprobar cuántos registros quedaron después del filtro
-    print("Registros encontrados:", len(df_partidos))
+        # Esto sirve para conservar únicamente los registros de los partidos seleccionados
+        df_partidos = df[
+            df["game_anon_id"].isin(ids_partidos_seleccionados)
+        ]
 
-   # Esto sirve para abrir los datos filtrados en D-Tale
-    d = dtale.show(df_filtrado, host="127.0.0.1")
+        from vista import abrir_vista_compartida, cerrar_vista, preparar_dataframe
 
-    # Esto sirve para obtener la dirección web de D-Tale
-    url_dtale = d._url
+        df_filtrado = preparar_dataframe(df_partidos, campos_seleccionados)
 
-    # Esto sirve para mostrar la dirección que el analista puede abrir en el navegador
-    print("\nD-Tale está disponible en:")
-    print(url_dtale)
+        # Esto sirve para comprobar qué columnas quedaron en la consulta
+        print("\nColumnas seleccionadas:")
+        print(df_filtrado.columns.tolist())
 
-    # Esto sirve para intentar abrir automáticamente D-Tale en el navegador
-    d.open_browser()
+        # Esto sirve para comprobar el tamaño final de la consulta
+        print("Tamaño final:", df_filtrado.shape)
 
-    # Esto sirve para mantener activo el servidor de D-Tale mientras el analista usa la visualización
-    input("\nPresiona Enter cuando quieras cerrar D-Tale...")
+        # Esto sirve para comprobar qué partidos se utilizarán en la consulta
+        print("\nPartidos seleccionados:", partidos_seleccionados)
+        print("IDs correspondientes:", ids_partidos_seleccionados)
+
+        # Esto sirve para comprobar cuántos registros quedaron después del filtro
+        print("Registros encontrados:", len(df_partidos))
+
+        abrir_vista_compartida(df_filtrado)
+        input("\nPresiona Enter cuando quieras cerrar la vista...")
+        cerrar_vista()
+
+
+if __name__ == "__main__":
+    iniciar()
