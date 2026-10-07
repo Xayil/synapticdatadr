@@ -60,3 +60,4 @@ partidos_altura_año = pd.crosstab(
     contexto_partidos["altitude_category"],
     dropna=False
 )
+#hola 
