@@ -35,6 +35,7 @@ METRICAS = [
     {"col": "VertApprAngle", "nombre": "Ángulo vertical de aproximación", "unidad": "°", "grupo": "Ángulos", "radar": True},
     {"col": "HorzApprAngle", "nombre": "Ángulo horizontal de aproximación", "unidad": "°", "grupo": "Ángulos", "radar": False},
     {"col": "stuff_plus", "nombre": "Stuff+", "unidad": "", "grupo": "Decisión", "radar": False},
+    {"col": "location_plus", "nombre": "Location+", "unidad": "", "grupo": "Decisión", "radar": False},
 ]
 
 
@@ -123,6 +124,16 @@ def stuff_ponderado(repertorio: list[dict]) -> float:
     return float(np.average(valores, weights=pesos))
 
 
+def location_ponderado(repertorio: list[dict]) -> float:
+    """Promedio de Location+ con los mismos pesos que el Stuff+."""
+    con_ubicacion = [fila for fila in repertorio if _finito(fila.get("location_plus"))]
+    if not con_ubicacion:
+        return float("nan")
+    return stuff_ponderado(
+        [{**fila, "stuff_plus": fila["location_plus"]} for fila in con_ubicacion]
+    )
+
+
 def banda_stuff(stuff: float) -> str:
     if not np.isfinite(stuff):
         return "Sin Stuff+"
@@ -149,8 +160,8 @@ def texto_decision(repertorio: list[dict], referencia: pd.DataFrame, minimo: int
     global_stuff = stuff_ponderado(repertorio)
     lectura = (
         f"El repertorio queda en Stuff+ {global_stuff:.0f}. "
-        "100 es el lanzamiento promedio de toda la organización y 10 puntos son una desviación estándar. "
-        "Un slider suele vivir arriba de 100 y un sinker abajo, porque no producen el mismo whiff. "
+        "100 es el lanzamiento promedio de ese mismo tipo y 10 puntos son una desviación estándar dentro del tipo. "
+        "Una recta ya no se compara contra un slider: cada uno tiene su propia escala. "
         "Para decidir si el recluta compite con el roster, el número que importa es el percentil "
         "contra pitchers del mismo tipo y de la misma mano."
     )
@@ -176,10 +187,19 @@ def texto_decision(repertorio: list[dict], referencia: pd.DataFrame, minimo: int
             lugar = "junto a la mediana de ese grupo"
         else:
             lugar = _lugar_percentil(percentil)
-        detalles.append(
+        frase = (
             f"El {tipo} de {mano} queda en {fila['stuff_plus']:.0f}, "
             f"contra una mediana de {mediana:.0f} (percentil {percentil:.0f}), {lugar}."
         )
+        if _finito(fila.get("location_plus")) and "location_plus" in grupo.columns:
+            percentil_loc = percentil_empirico(fila["location_plus"], grupo["location_plus"])
+            mediana_loc = float(pd.to_numeric(grupo["location_plus"], errors="coerce").median())
+            frase += (
+                f" Su Location+ es {fila['location_plus']:.0f} "
+                f"(mediana {mediana_loc:.0f}, percentil {percentil_loc:.0f}): "
+                "eso mide la ubicación después de descontar el Stuff+."
+            )
+        detalles.append(frase)
 
     if cerca_de_la_mediana and all(cerca_de_la_mediana):
         cierre = (
