@@ -1,8 +1,8 @@
 """Sistema de reclutamiento para el coach.
 
-El recluta se captura a mano o con un CSV de TrackMan/Rapsodo. Cada tipo de
-lanzamiento se compara con los pitchers reales de la misma mano y se califica
-con el Stuff+ definido en modelos/Modelo_general_STUFF+.ipynb.
+El recluta se captura a mano o con un CSV de TrackMan/Rapsodo. Dos prospectos
+se comparan entre sí y contra los pitchers reales de la misma mano, con el
+Stuff+ definido en modelos/Modelo_general_STUFF+.ipynb.
 """
 
 from __future__ import annotations
@@ -20,9 +20,11 @@ from reclutamiento.comparacion import (
     banda_stuff,
     cohorte,
     ficha_comparacion,
+    filas_duelo,
     location_ponderado,
     stuff_ponderado,
     texto_decision,
+    texto_duelo,
 )
 from reclutamiento.fisica import (
     ESTADIO_DEFAULT,
@@ -40,6 +42,7 @@ from reclutamiento.stuff_plus import (
 )
 
 ROJO = "#8E1B1B"
+AZUL = "#1E4D8C"
 TINTA = "#1C1917"
 PIEDRA = "#78716C"
 CREMA = "#F6F3EE"
@@ -526,6 +529,163 @@ def figura_movimiento(grupo: pd.DataFrame, recluta: dict) -> go.Figure | None:
     return estilo(figura, "Movimiento del pitcheo")
 
 
+def figura_duelo(filas: list[dict], nombre_a: str, nombre_b: str) -> go.Figure | None:
+    if not filas:
+        return None
+    etiquetas = []
+    stuff_a = []
+    stuff_b = []
+    medianas = []
+    for fila in filas:
+        tipo = ETIQUETAS_TIPO.get(fila["tipo"], fila["tipo"])
+        mano = "der." if fila["mano"] == "Right" else "izq."
+        etiquetas.append(f"{tipo} · {mano}")
+        stuff_a.append(fila["a"]["stuff_plus"] if fila["a"] else np.nan)
+        stuff_b.append(fila["b"]["stuff_plus"] if fila["b"] else np.nan)
+        medianas.append(fila["mediana_stuff"])
+    figura = go.Figure()
+    figura.add_trace(
+        go.Bar(
+            x=etiquetas,
+            y=stuff_a,
+            name=nombre_a,
+            marker_color=ROJO,
+            hovertemplate="%{x}<br>" + nombre_a + "<br>Stuff+ %{y:.0f}<extra></extra>",
+        )
+    )
+    figura.add_trace(
+        go.Bar(
+            x=etiquetas,
+            y=stuff_b,
+            name=nombre_b,
+            marker_color=AZUL,
+            hovertemplate="%{x}<br>" + nombre_b + "<br>Stuff+ %{y:.0f}<extra></extra>",
+        )
+    )
+    figura.add_trace(
+        go.Scatter(
+            x=etiquetas,
+            y=medianas,
+            mode="markers",
+            name="Mediana del equipo",
+            marker=dict(symbol="line-ew", size=22, color=TINTA, line=dict(width=3, color=TINTA)),
+            hovertemplate="%{x}<br>Mediana del equipo %{y:.0f}<extra></extra>",
+        )
+    )
+    figura.update_layout(barmode="group")
+    figura.add_hline(y=100, line_dash="dash", line_color=PIEDRA, annotation_text="100 · promedio del tipo")
+    figura.update_yaxes(title="Stuff+")
+    return estilo(figura, "Stuff+ de cada recluta contra la mediana del equipo")
+
+
+def figura_radar_par(
+    ficha_a: pd.DataFrame | None,
+    ficha_b: pd.DataFrame | None,
+    nombre_a: str,
+    nombre_b: str,
+) -> go.Figure | None:
+    def serie(ficha: pd.DataFrame | None) -> dict[str, float]:
+        if ficha is None or ficha.empty:
+            return {}
+        radar = ficha[ficha["radar"] & ficha["percentil"].notna()]
+        return {nombre: float(valor) for nombre, valor in zip(radar["metrica"], radar["percentil"])}
+
+    series = ((nombre_a, serie(ficha_a), ROJO, "rgba(142, 27, 27, 0.18)"), (nombre_b, serie(ficha_b), AZUL, "rgba(30, 77, 140, 0.18)"))
+    categorias = list(dict.fromkeys(nombre for _, datos, _, _ in series for nombre in datos))
+    if len(categorias) < 3:
+        return None
+    figura = go.Figure()
+    figura.add_trace(
+        go.Scatterpolar(
+            r=[50] * (len(categorias) + 1),
+            theta=categorias + [categorias[0]],
+            name="Mediana del equipo",
+            line=dict(color=PIEDRA, width=1.5, dash="dash"),
+        )
+    )
+    for nombre, datos, color, relleno in series:
+        if len(datos) < 3:
+            continue
+        orden = [item for item in categorias if item in datos]
+        valores = [datos[item] for item in orden]
+        figura.add_trace(
+            go.Scatterpolar(
+                r=valores + [valores[0]],
+                theta=orden + [orden[0]],
+                fill="toself",
+                name=nombre,
+                line=dict(color=color, width=2),
+                fillcolor=relleno,
+            )
+        )
+    figura.update_layout(
+        polar=dict(
+            bgcolor="rgba(0,0,0,0)",
+            radialaxis=dict(range=[0, 100], dtick=25, gridcolor="#E7E0D6", linecolor="#E7E0D6"),
+            angularaxis=dict(gridcolor="#E7E0D6"),
+        ),
+        showlegend=True,
+    )
+    return estilo(figura, "Percentil de los dos dentro del equipo")
+
+
+def figura_movimiento_par(
+    grupo: pd.DataFrame,
+    pitch_a: dict | None,
+    pitch_b: dict | None,
+    nombre_a: str,
+    nombre_b: str,
+) -> go.Figure | None:
+    marcas = [
+        (pitch_a, nombre_a, ROJO, "diamond"),
+        (pitch_b, nombre_b, AZUL, "circle"),
+    ]
+    marcas = [
+        (pitch, nombre, color, simbolo)
+        for pitch, nombre, color, simbolo in marcas
+        if pitch is not None and np.isfinite(pitch.get("HorzBreak", np.nan)) and np.isfinite(pitch.get("InducedVertBreak", np.nan))
+    ]
+    if not marcas and (grupo.empty or "HorzBreak" not in grupo):
+        return None
+    figura = go.Figure()
+    if not grupo.empty and "HorzBreak" in grupo and "InducedVertBreak" in grupo:
+        figura.add_trace(
+            go.Scatter(
+                x=grupo["HorzBreak"],
+                y=grupo["InducedVertBreak"],
+                mode="markers",
+                name="Equipo",
+                marker=dict(size=9, color="#D6D3D1"),
+                customdata=np.stack(
+                    [
+                        pd.to_numeric(grupo["RelSpeed"], errors="coerce"),
+                        pd.to_numeric(grupo["stuff_plus"], errors="coerce"),
+                    ],
+                    axis=1,
+                )
+                if "RelSpeed" in grupo and "stuff_plus" in grupo
+                else None,
+                hovertemplate="HorzBreak %{x:.1f} in<br>IVB %{y:.1f} in<extra>Equipo</extra>",
+            )
+        )
+    for pitch, nombre, color, simbolo in marcas:
+        figura.add_trace(
+            go.Scatter(
+                x=[pitch["HorzBreak"]],
+                y=[pitch["InducedVertBreak"]],
+                mode="markers+text",
+                text=[nombre],
+                textposition="top center",
+                name=nombre,
+                marker=dict(size=16, color=color, symbol=simbolo, line=dict(color="white", width=1)),
+                hovertemplate=nombre + "<br>HorzBreak %{x:.1f} in<br>IVB %{y:.1f} in<extra></extra>",
+            )
+        )
+    figura.update_xaxes(title="Quiebre horizontal (in)")
+    figura.update_yaxes(title="IVB (in)")
+    return estilo(figura, "Movimiento de los dos contra el equipo")
+
+
 def figura_stuff(repertorio: list[dict], referencia: pd.DataFrame, minimo: int) -> go.Figure:
     etiquetas = []
     valores = []
@@ -647,16 +807,36 @@ def valor_metrica(ficha: pd.DataFrame, columna: str, campo: str = "percentil") -
 
 
 def iniciar_estado():
-    if "repertorio" not in st.session_state:
-        st.session_state.repertorio = []
     if "siguiente_id" not in st.session_state:
         st.session_state.siguiente_id = 1
     if "form_id" not in st.session_state:
         st.session_state.form_id = 0
-    if "recluta" not in st.session_state:
-        st.session_state.recluta = ""
     if "estadio_escenario" not in st.session_state:
         st.session_state.estadio_escenario = ESTADIO_DEFAULT
+    if "reclutas" not in st.session_state:
+        st.session_state.reclutas = {
+            "a": {
+                "nombre": st.session_state.get("recluta") or "",
+                "repertorio": list(st.session_state.get("repertorio") or []),
+            },
+            "b": {"nombre": "", "repertorio": []},
+        }
+    if "activo" not in st.session_state:
+        st.session_state.activo = "a"
+
+
+def nombre_visible(clave: str) -> str:
+    reclutas = st.session_state.get("reclutas") or {}
+    nombre = ""
+    if clave in reclutas:
+        nombre = str(reclutas[clave].get("nombre") or "").strip()
+    if nombre:
+        return nombre
+    return "Recluta A" if clave == "a" else "Recluta B"
+
+
+def repertorio_en_edicion() -> list[dict]:
+    return st.session_state.reclutas[st.session_state.activo]["repertorio"]
 
 
 def repertorio_en_escenario(repertorio: list[dict], estadio: str, modelo: dict) -> list[dict]:
@@ -877,6 +1057,13 @@ def tab_captura(modelo: dict, referencia: pd.DataFrame, vista: list[dict]):
     avisos = st.session_state.pop("csv_avisos", None)
     if avisos:
         st.warning("Algunos tipos del CSV no entraron. " + " ".join(avisos))
+    activo = nombre_visible(st.session_state.activo)
+    st.markdown(
+        f'<p class="nota">Estos datos se guardan en <b>{html.escape(activo)}</b>. '
+        "En el panel izquierdo cambias de recluta para cargar al otro. "
+        "Los dos se comparan en la pestaña Entre dos.</p>",
+        unsafe_allow_html=True,
+    )
     st.subheader("Datos del lanzamiento")
     st.markdown(
         '<p class="nota">Un slider se compara contra sliders de la misma mano. '
@@ -1098,7 +1285,7 @@ def tab_captura(modelo: dict, referencia: pd.DataFrame, vista: list[dict]):
                 st.warning("Faltan datos obligatorios: " + ", ".join(vacios) + ".")
             else:
                 try:
-                    st.session_state.repertorio.append(
+                    repertorio_en_edicion().append(
                         construir_lanzamiento(
                             {
                                 "AutoPitchType": tipo,
@@ -1167,12 +1354,13 @@ def tab_captura(modelo: dict, referencia: pd.DataFrame, vista: list[dict]):
             except (ValueError, pd.errors.ParserError, UnicodeDecodeError) as exc:
                 st.warning(f"No pude leer el archivo. {exc}")
             else:
-                st.session_state.repertorio.extend(nuevos)
+                repertorio_en_edicion().extend(nuevos)
                 st.rerun()
 
         if st.button("Cargar el perfil mediano de un derecho"):
-            st.session_state.repertorio = perfil_mediano(referencia, modelo)
+            st.session_state.reclutas[st.session_state.activo]["repertorio"] = perfil_mediano(referencia, modelo)
             st.rerun()
+        st.caption(f"El CSV y el perfil mediano entran a {nombre_visible(st.session_state.activo)}.")
 
     repertorio = vista
     st.subheader("Repertorio cargado")
@@ -1220,13 +1408,18 @@ def tab_captura(modelo: dict, referencia: pd.DataFrame, vista: list[dict]):
         format_func=lambda i: etiqueta_pitcheo(repertorio[i]),
     )
     if st.button("Quitar seleccionado"):
-        st.session_state.repertorio.pop(indice)
+        repertorio_en_edicion().pop(indice)
         st.rerun()
 
 
 def tab_comparacion(modelo: dict, referencia: pd.DataFrame, minimo: int, vista: list[dict]):
     repertorio = vista
-    st.subheader("Recluta contra la organización")
+    st.subheader(f"{nombre_visible(st.session_state.activo)} contra la organización")
+    st.markdown(
+        '<p class="nota">Esta pestaña sigue al recluta que estás capturando. '
+        "Los dos juntos, entre sí y contra el equipo, están en Entre dos.</p>",
+        unsafe_allow_html=True,
+    )
     if not repertorio:
         st.info("Carga un pitcheo en la pestaña de captura para abrir la comparativa.")
         return
@@ -1336,7 +1529,12 @@ def tab_comparacion(modelo: dict, referencia: pd.DataFrame, minimo: int, vista: 
 
 def tab_decision(modelo: dict, referencia: pd.DataFrame, minimo: int, vista: list[dict]):
     repertorio = vista
-    st.subheader("Stuff+ y recomendación")
+    st.subheader(f"Stuff+ y recomendación · {nombre_visible(st.session_state.activo)}")
+    st.markdown(
+        '<p class="nota">La recomendación es del recluta que estás capturando. '
+        "Para dudar entre dos, abre Entre dos.</p>",
+        unsafe_allow_html=True,
+    )
     if not repertorio:
         st.info("Carga un pitcheo en la pestaña de captura para calificar el repertorio.")
         return
@@ -1435,6 +1633,155 @@ Los coeficientes son asociaciones dentro del modelo, no efectos causales. Veloci
         )
 
 
+def _numero(valor, decimales: int, sufijo: str = "") -> str:
+    if valor is None or not np.isfinite(valor):
+        return "—"
+    return f"{float(valor):.{decimales}f}{sufijo}"
+
+
+def _percentil(valor) -> str:
+    if valor is None or not np.isfinite(valor):
+        return "—"
+    return f"{float(valor):.0f}"
+
+
+def tabla_duelo(filas: list[dict], nombre_a: str, nombre_b: str) -> pd.DataFrame:
+    registros = []
+    for fila in filas:
+        pitch_a = fila["a"]
+        pitch_b = fila["b"]
+        registros.append(
+            {
+                "Pitcheo": ETIQUETAS_TIPO.get(fila["tipo"], fila["tipo"]),
+                "Mano": "Derecha" if fila["mano"] == "Right" else "Izquierda",
+                f"Stuff+ {nombre_a}": _numero(None if pitch_a is None else pitch_a.get("stuff_plus"), 0),
+                f"Percentil {nombre_a}": _percentil(fila["percentil_stuff_a"]),
+                f"Stuff+ {nombre_b}": _numero(None if pitch_b is None else pitch_b.get("stuff_plus"), 0),
+                f"Percentil {nombre_b}": _percentil(fila["percentil_stuff_b"]),
+                "Mediana Stuff+ del equipo": _numero(fila["mediana_stuff"], 0),
+                f"Location+ {nombre_a}": _numero(None if pitch_a is None else pitch_a.get("location_plus"), 0),
+                f"Location+ {nombre_b}": _numero(None if pitch_b is None else pitch_b.get("location_plus"), 0),
+                "Mediana Location+": _numero(fila["mediana_location"], 0),
+                f"Velo {nombre_a}": _numero(None if pitch_a is None else pitch_a.get("RelSpeed"), 1, " mph"),
+                f"Velo {nombre_b}": _numero(None if pitch_b is None else pitch_b.get("RelSpeed"), 1, " mph"),
+                "Mediana velo": _numero(fila["mediana_velo"], 1, " mph"),
+                f"Spin {nombre_a}": _numero(None if pitch_a is None else pitch_a.get("SpinRate"), 0, " rpm"),
+                f"Spin {nombre_b}": _numero(None if pitch_b is None else pitch_b.get("SpinRate"), 0, " rpm"),
+                "Mediana spin": _numero(fila["mediana_spin"], 0, " rpm"),
+                f"IVB {nombre_a}": _numero(None if pitch_a is None else pitch_a.get("InducedVertBreak"), 1, " in"),
+                f"IVB {nombre_b}": _numero(None if pitch_b is None else pitch_b.get("InducedVertBreak"), 1, " in"),
+                "Mediana IVB": _numero(fila["mediana_ivb"], 1, " in"),
+                f"HorzBreak {nombre_a}": _numero(None if pitch_a is None else pitch_a.get("HorzBreak"), 1, " in"),
+                f"HorzBreak {nombre_b}": _numero(None if pitch_b is None else pitch_b.get("HorzBreak"), 1, " in"),
+                "Mediana HorzBreak": _numero(fila["mediana_hb"], 1, " in"),
+                "Pitchers del equipo": fila["n_equipo"],
+            }
+        )
+    return pd.DataFrame(registros)
+
+
+def tab_duelo(referencia: pd.DataFrame, minimo: int, vista_a: list[dict], vista_b: list[dict]):
+    nombre_a = nombre_visible("a")
+    nombre_b = nombre_visible("b")
+    st.subheader(f"{nombre_a} contra {nombre_b}")
+    st.markdown(
+        '<p class="nota">Los dos repertorios se recalculan con el estadio del escenario. '
+        "Cambiar el parque, el nombre o el pitcheo de cualquiera actualiza esta vista al momento. "
+        "El percentil es contra pitchers del equipo con el mismo tipo de lanzamiento y la misma mano.</p>",
+        unsafe_allow_html=True,
+    )
+    if vista_a:
+        st.markdown(f'<p class="nota">{html.escape(nota_escenario(vista_a[0]))}</p>', unsafe_allow_html=True)
+    elif vista_b:
+        st.markdown(f'<p class="nota">{html.escape(nota_escenario(vista_b[0]))}</p>', unsafe_allow_html=True)
+
+    lectura = texto_duelo(nombre_a, vista_a, nombre_b, vista_b, referencia, minimo)
+    st.markdown(f'<div class="decision"><p>{html.escape(lectura)}</p></div>', unsafe_allow_html=True)
+
+    stuff_a = stuff_ponderado(vista_a)
+    stuff_b = stuff_ponderado(vista_b)
+    location_a = location_ponderado(vista_a)
+    location_b = location_ponderado(vista_b)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric(f"Stuff+ · {nombre_a}", _numero(stuff_a, 0))
+    m2.metric(f"Stuff+ · {nombre_b}", _numero(stuff_b, 0))
+    m3.metric(f"Location+ · {nombre_a}", _numero(location_a, 0))
+    m4.metric(f"Location+ · {nombre_b}", _numero(location_b, 0))
+
+    if not vista_a and not vista_b:
+        return
+
+    filas = filas_duelo(vista_a, vista_b, referencia, minimo)
+    grafico = figura_duelo(filas, nombre_a, nombre_b)
+    if grafico is not None:
+        st.plotly_chart(grafico, width="stretch")
+
+    etiqueta = (
+        lambda i: f"{ETIQUETAS_TIPO.get(filas[i]['tipo'], filas[i]['tipo'])} · "
+        f"{ETIQUETAS_MANO.get(filas[i]['mano'], filas[i]['mano'])}"
+    )
+    indice = st.selectbox("Pitcheo para ver el detalle", range(len(filas)), format_func=etiqueta)
+    elegido = filas[indice]
+    pitch_a = elegido["a"]
+    pitch_b = elegido["b"]
+    detalle_a, detalle_b = st.columns(2)
+    for columna, pitch, nombre, percentil_stuff, percentil_velo in (
+        (detalle_a, pitch_a, nombre_a, elegido["percentil_stuff_a"], elegido["percentil_velo_a"]),
+        (detalle_b, pitch_b, nombre_b, elegido["percentil_stuff_b"], elegido["percentil_velo_b"]),
+    ):
+        with columna:
+            st.markdown(f"**{html.escape(nombre)}**")
+            if pitch is None:
+                st.caption("Este recluta no trae ese pitcheo.")
+                continue
+            st.metric(
+                "Stuff+",
+                f"{pitch['stuff_plus']:.0f}",
+                None if not np.isfinite(percentil_stuff) else f"percentil {percentil_stuff:.0f} del equipo",
+            )
+            st.metric(
+                "Velocidad",
+                f"{pitch['RelSpeed']:.1f} mph",
+                None if not np.isfinite(percentil_velo) else f"percentil {percentil_velo:.0f} del equipo",
+            )
+            st.caption(
+                f"Spin {pitch['SpinRate']:.0f} rpm · IVB {pitch['InducedVertBreak']:.1f} in · "
+                f"HorzBreak {pitch['HorzBreak']:.1f} in"
+            )
+            if np.isfinite(pitch.get("location_plus", np.nan)):
+                st.caption(f"Location+ {pitch['location_plus']:.0f}")
+
+    ficha_a = ficha_comparacion(pitch_a, elegido["grupo"]) if pitch_a else None
+    ficha_b = ficha_comparacion(pitch_b, elegido["grupo"]) if pitch_b else None
+    radar = figura_radar_par(ficha_a, ficha_b, nombre_a, nombre_b)
+    movimiento = figura_movimiento_par(elegido["grupo"], pitch_a, pitch_b, nombre_a, nombre_b)
+    grafico_a, grafico_b = st.columns(2)
+    with grafico_a:
+        if radar is None:
+            st.info("Faltan métricas para armar el radar de este pitcheo.")
+        else:
+            st.plotly_chart(radar, width="stretch")
+    with grafico_b:
+        if movimiento is None:
+            st.info("Falta el movimiento para ubicar este pitcheo.")
+        else:
+            st.plotly_chart(movimiento, width="stretch")
+
+    tabla = tabla_duelo(filas, nombre_a, nombre_b)
+    st.dataframe(tabla, hide_index=True, width="stretch")
+    st.markdown(
+        '<p class="nota">En el quiebre horizontal, un percentil alto quiere decir un número más positivo '
+        "dentro de la misma mano. La mediana del equipo es el punto de referencia para decidir.</p>",
+        unsafe_allow_html=True,
+    )
+    st.download_button(
+        "Descargar la comparación de los dos",
+        data=tabla.to_csv(index=False).encode("utf-8-sig"),
+        file_name="comparacion_dos_reclutas.csv",
+        mime="text/csv",
+    )
+
+
 def main():
     st.set_page_config(
         page_title="Reclutamiento · DRITAM",
@@ -1445,9 +1792,23 @@ def main():
     iniciar_estado()
 
     with st.sidebar:
-        st.markdown(f"<p class='marca'>DRITAM</p>", unsafe_allow_html=True)
-        st.header("Recluta")
-        st.session_state.recluta = st.text_input("Nombre", value=st.session_state.recluta, placeholder="Prospecto")
+        st.markdown("<p class='marca'>DRITAM</p>", unsafe_allow_html=True)
+        st.header("Dos reclutas")
+        for clave, etiqueta in (("a", "Recluta A"), ("b", "Recluta B")):
+            llave = f"nombre_{clave}"
+            if llave not in st.session_state:
+                st.session_state[llave] = st.session_state.reclutas[clave]["nombre"]
+            st.text_input(etiqueta, key=llave, placeholder="Nombre del prospecto")
+            st.session_state.reclutas[clave]["nombre"] = st.session_state[llave]
+        st.radio(
+            "Repertorio que estás capturando",
+            ["a", "b"],
+            horizontal=True,
+            format_func=nombre_visible,
+            key="activo",
+            help="Los pitcheos nuevos, el CSV y el perfil mediano entran a este recluta. "
+            "Entre dos siempre muestra a los dos.",
+        )
         minimo = st.slider(
             "Mínimo de lanzamientos para entrar a la comparación",
             min_value=10,
@@ -1461,14 +1822,14 @@ def main():
             list(ALTITUDES),
             format_func=lambda valor: ALTITUDES[valor],
             key="estadio_escenario",
-            help="Al cambiar el estadio, Stuff+ y Location+ se recalculan al momento con la densidad de ese aire. "
+            help="Al cambiar el estadio, Stuff+ y Location+ de los dos reclutas se recalculan al momento. "
             "Velocidad, giro, quiebre y ubicación del reporte se quedan iguales.",
         )
         st.caption(
-            "Este control es en vivo. Prueba otro parque y la comparación y la decisión se actualizan solas."
+            "El estadio y el recluta activo son en vivo. Entre dos compara a los dos entre sí y contra el equipo."
         )
-        if st.button("Limpiar repertorio", disabled=not st.session_state.repertorio):
-            st.session_state.repertorio = []
+        if st.button("Limpiar este repertorio", disabled=not repertorio_en_edicion()):
+            st.session_state.reclutas[st.session_state.activo]["repertorio"] = []
             st.rerun()
 
     try:
@@ -1479,35 +1840,42 @@ def main():
         st.error(str(exc))
         return
 
-    nombre = st.session_state.recluta.strip()
-    titulo = "Reclutamiento de pitchers"
-    if nombre:
-        titulo = f"Recluta: {nombre}"
+    nombre_a = st.session_state.reclutas["a"]["nombre"].strip()
+    nombre_b = st.session_state.reclutas["b"]["nombre"].strip()
+    if nombre_a and nombre_b:
+        titulo = f"{nombre_a} y {nombre_b}"
+    elif nombre_a or nombre_b:
+        titulo = f"Recluta: {nombre_a or nombre_b}"
+    else:
+        titulo = "Reclutamiento de pitchers"
     st.markdown(
         f"""
         <div class="encabezado">
             <p class="marca">DRITAM · Diablos Rojos</p>
             <h1>{html.escape(titulo)}</h1>
-            <p class="bajada">Captura el material del prospecto y compáralo con los pitchers reales
+            <p class="bajada">Captura dos prospectos y compáralos entre sí y con los pitchers reales
             de la organización. En Stuff+ y en Location+, 100 es el promedio de ese tipo de lanzamiento.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    vista = repertorio_en_escenario(
-        st.session_state.repertorio,
-        st.session_state.get("estadio_escenario", ESTADIO_DEFAULT),
-        modelo,
-    )
+    estadio = st.session_state.get("estadio_escenario", ESTADIO_DEFAULT)
+    vista_a = repertorio_en_escenario(st.session_state.reclutas["a"]["repertorio"], estadio, modelo)
+    vista_b = repertorio_en_escenario(st.session_state.reclutas["b"]["repertorio"], estadio, modelo)
+    vista = vista_a if st.session_state.activo == "a" else vista_b
 
-    captura, comparacion, decision = st.tabs(["1 · Captura", "2 · Comparación", "3 · Decisión"])
+    captura, comparacion, decision, duelo = st.tabs(
+        ["1 · Captura", "2 · Comparación", "3 · Decisión", "4 · Entre dos"]
+    )
     with captura:
         tab_captura(modelo, referencia, vista)
     with comparacion:
         tab_comparacion(modelo, referencia, minimo, vista)
     with decision:
         tab_decision(modelo, referencia, minimo, vista)
+    with duelo:
+        tab_duelo(referencia, minimo, vista_a, vista_b)
 
 
 if __name__ == "__main__":
