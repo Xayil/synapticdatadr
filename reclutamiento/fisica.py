@@ -37,14 +37,45 @@ M_A_PULGADAS = 39.3701
 FT_A_M = 0.3048
 DISTANCIA_MONTE_FT = 60.5
 
-# La base no trae presión ni temperatura por lanzamiento, solo la categoría
-# de altitud. Extreme corresponde al Alfredo Harp Helú (2,240 m).
+# La base histórica solo trae tres categorías. El recluta se califica con la
+# altitud real del estadio, y ρ sale de la atmósfera estándar a esos metros.
 ALTITUD_M = {
     "No Altitude": 0.0,
     "Medium Altitude": 1200.0,
     "Extreme Altitude": 2240.0,
 }
-ALTITUD_DEFAULT = "Extreme Altitude"
+
+ESTADIOS = [
+    {"id": "alfredo_harp_helu", "nombre": "Alfredo Harp Helú", "metros": 2232, "clase": "Extreme", "aprox": False, "lugar": ""},
+    {"id": "hermanos_serdan", "nombre": "Hermanos Serdán", "metros": 2192, "clase": "Extreme", "aprox": False, "lugar": ""},
+    {"id": "alberto_romo_chavez", "nombre": "Alberto Romo Chávez", "metros": 1921, "clase": "Extreme", "aprox": False, "lugar": ""},
+    {"id": "francisco_villa", "nombre": "Francisco Villa", "metros": 1906, "clase": "Extreme", "aprox": False, "lugar": ""},
+    {"id": "domingo_santana", "nombre": "Domingo Santana", "metros": 1820, "clase": "Extreme", "aprox": False, "lugar": ""},
+    {"id": "finsus", "nombre": "Finsus", "metros": 1820, "clase": "Extreme", "aprox": False, "lugar": ""},
+    {"id": "coors_field", "nombre": "Coors Field", "metros": 1610, "clase": "Extreme", "aprox": False, "lugar": "Colorado", "detalle": "5,280 ft"},
+    {"id": "yuva_vasconcelos", "nombre": "Yu'Va / Eduardo Vasconcelos", "metros": 1566, "clase": "Extreme", "aprox": True, "lugar": ""},
+    {"id": "francisco_madero", "nombre": "Francisco I. Madero", "metros": 1565, "clase": "Extreme", "aprox": False, "lugar": ""},
+    {"id": "panamericano", "nombre": "Panamericano", "metros": 1555, "clase": "Extreme", "aprox": False, "lugar": ""},
+    {"id": "monumental_chihuahua", "nombre": "Monumental Chihuahua", "metros": 1415, "clase": "Medium", "aprox": False, "lugar": ""},
+    {"id": "revolucion", "nombre": "Revolución", "metros": 1135, "clase": "Medium", "aprox": False, "lugar": ""},
+]
+for _estadio in ESTADIOS:
+    ALTITUD_M[_estadio["id"]] = float(_estadio["metros"])
+
+ESTADIO_DEFAULT = "alfredo_harp_helu"
+ALTITUD_DEFAULT = ESTADIO_DEFAULT
+
+
+def etiqueta_estadio(estadio: dict) -> str:
+    """Nombre, metros sobre el nivel del mar y clasificación."""
+    metros = f"{estadio['metros']:,}"
+    if estadio.get("aprox"):
+        metros = f"≈{metros}"
+    texto = f"{metros} msnm"
+    if estadio.get("detalle"):
+        texto = f"{texto} ({estadio['detalle']})"
+    lugar = f" · {estadio['lugar']}" if estadio.get("lugar") else ""
+    return f"{estadio['nombre']}{lugar} · {texto} · {estadio['clase']}"
 
 
 def presion_isa(altura_m: float | np.ndarray) -> float | np.ndarray:

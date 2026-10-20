@@ -35,6 +35,7 @@ METRICAS = [
     {"col": "VertApprAngle", "nombre": "Ángulo vertical de aproximación", "unidad": "°", "grupo": "Ángulos", "radar": True},
     {"col": "HorzApprAngle", "nombre": "Ángulo horizontal de aproximación", "unidad": "°", "grupo": "Ángulos", "radar": False},
     {"col": "stuff_plus", "nombre": "Stuff+", "unidad": "", "grupo": "Decisión", "radar": False},
+    {"col": "location_plus", "nombre": "Location+", "unidad": "", "grupo": "Decisión", "radar": False},
 ]
 
 
@@ -123,6 +124,16 @@ def stuff_ponderado(repertorio: list[dict]) -> float:
     return float(np.average(valores, weights=pesos))
 
 
+def location_ponderado(repertorio: list[dict]) -> float:
+    """Promedio de Location+ con los mismos pesos que el Stuff+."""
+    con_ubicacion = [fila for fila in repertorio if _finito(fila.get("location_plus"))]
+    if not con_ubicacion:
+        return float("nan")
+    return stuff_ponderado(
+        [{**fila, "stuff_plus": fila["location_plus"]} for fila in con_ubicacion]
+    )
+
+
 def banda_stuff(stuff: float) -> str:
     if not np.isfinite(stuff):
         return "Sin Stuff+"
@@ -149,8 +160,8 @@ def texto_decision(repertorio: list[dict], referencia: pd.DataFrame, minimo: int
     global_stuff = stuff_ponderado(repertorio)
     lectura = (
         f"El repertorio queda en Stuff+ {global_stuff:.0f}. "
-        "100 es el lanzamiento promedio de toda la organización y 10 puntos son una desviación estándar. "
-        "Un slider suele vivir arriba de 100 y un sinker abajo, porque no producen el mismo whiff. "
+        "100 es el lanzamiento promedio de ese mismo tipo y 10 puntos son una desviación estándar dentro del tipo. "
+        "Una recta ya no se compara contra un slider: cada uno tiene su propia escala. "
         "Para decidir si el recluta compite con el roster, el número que importa es el percentil "
         "contra pitchers del mismo tipo y de la misma mano."
     )
@@ -176,10 +187,19 @@ def texto_decision(repertorio: list[dict], referencia: pd.DataFrame, minimo: int
             lugar = "junto a la mediana de ese grupo"
         else:
             lugar = _lugar_percentil(percentil)
-        detalles.append(
+        frase = (
             f"El {tipo} de {mano} queda en {fila['stuff_plus']:.0f}, "
             f"contra una mediana de {mediana:.0f} (percentil {percentil:.0f}), {lugar}."
         )
+        if _finito(fila.get("location_plus")) and "location_plus" in grupo.columns:
+            percentil_loc = percentil_empirico(fila["location_plus"], grupo["location_plus"])
+            mediana_loc = float(pd.to_numeric(grupo["location_plus"], errors="coerce").median())
+            frase += (
+                f" Su Location+ es {fila['location_plus']:.0f} "
+                f"(mediana {mediana_loc:.0f}, percentil {percentil_loc:.0f}): "
+                "eso mide la ubicación después de descontar el Stuff+."
+            )
+        detalles.append(frase)
 
     if cerca_de_la_mediana and all(cerca_de_la_mediana):
         cierre = (
@@ -218,3 +238,218 @@ def texto_decision(repertorio: list[dict], referencia: pd.DataFrame, minimo: int
         )
 
     return lectura + " " + " ".join(detalles) + cierre + aviso
+
+
+def _pesos(filas: list[dict]) -> np.ndarray:
+    usos = np.array([float(fila.get("uso_pct") or 0) for fila in filas], dtype=float)
+    if np.nansum(usos) > 0:
+        return usos
+    cuentas = np.array([float(fila.get("n_lanzamientos") or 0) for fila in filas], dtype=float)
+    if np.nansum(cuentas) > 0:
+        return cuentas
+    return np.ones(len(filas), dtype=float)
+
+
+def representante(filas: list[dict]) -> dict:
+    """Un pitcheo por tipo. Si hay varios, promedia con el mismo peso que el Stuff+."""
+    if len(filas) == 1:
+        return dict(filas[0])
+    pesos = _pesos(filas)
+    salida = dict(filas[0])
+    columnas = (
+        "RelSpeed",
+        "EffectiveVelo",
+        "ZoneSpeed",
+        "SpinRate",
+        "InducedVertBreak",
+        "HorzBreak",
+        "VertBreak",
+        "Extension",
+        "RelHeight",
+        "RelSide",
+        "VertApprAngle",
+        "HorzApprAngle",
+        "stuff_plus",
+        "location_plus",
+        "PlateLocSide",
+        "PlateLocHeight",
+    )
+    for columna in columnas:
+        valores = []
+        pesos_validos = []
+        for fila, peso in zip(filas, pesos):
+            valor = fila.get(columna)
+            if _finito(valor):
+                valores.append(float(valor))
+                pesos_validos.append(float(peso))
+        salida[columna] = float(np.average(valores, weights=pesos_validos)) if valores else float("nan")
+    salida["uso_pct"] = float(np.nansum([fila.get("uso_pct") or 0 for fila in filas]))
+    return salida
+
+
+def arsenal(repertorio: list[dict]) -> tuple[list[tuple], dict[tuple, dict]]:
+    grupos: dict[tuple, list[dict]] = {}
+    orden: list[tuple] = []
+    for fila in repertorio:
+        llave = (fila["AutoPitchType"], fila["PitcherThrows"])
+        if llave not in grupos:
+            orden.append(llave)
+            grupos[llave] = []
+        grupos[llave].append(fila)
+    return orden, {llave: representante(grupos[llave]) for llave in orden}
+
+
+def _mediana_cohorte(grupo: pd.DataFrame, columna: str) -> float:
+    if grupo.empty or columna not in grupo.columns:
+        return float("nan")
+    muestra = pd.to_numeric(grupo[columna], errors="coerce").dropna()
+    if muestra.empty:
+        return float("nan")
+    return float(muestra.median())
+
+
+def _percentil_pitch(pitch: dict | None, grupo: pd.DataFrame, columna: str) -> float:
+    if pitch is None or not _finito(pitch.get(columna)) or grupo.empty or columna not in grupo.columns:
+        return float("nan")
+    return percentil_empirico(pitch[columna], grupo[columna])
+
+
+def filas_duelo(
+    repertorio_a: list[dict],
+    repertorio_b: list[dict],
+    referencia: pd.DataFrame,
+    minimo: int,
+) -> list[dict]:
+    """Una fila por pitcheo, con los dos reclutas y la mediana del equipo."""
+    orden_a, arsenal_a = arsenal(repertorio_a)
+    orden_b, arsenal_b = arsenal(repertorio_b)
+    llaves = list(dict.fromkeys([*orden_a, *orden_b]))
+    filas = []
+    for tipo, mano in llaves:
+        grupo = cohorte(referencia, tipo, mano, minimo)
+        pitch_a = arsenal_a.get((tipo, mano))
+        pitch_b = arsenal_b.get((tipo, mano))
+        filas.append(
+            {
+                "tipo": tipo,
+                "mano": mano,
+                "a": pitch_a,
+                "b": pitch_b,
+                "n_equipo": int(len(grupo)),
+                "mediana_stuff": _mediana_cohorte(grupo, "stuff_plus"),
+                "mediana_location": _mediana_cohorte(grupo, "location_plus"),
+                "mediana_velo": _mediana_cohorte(grupo, "RelSpeed"),
+                "mediana_spin": _mediana_cohorte(grupo, "SpinRate"),
+                "mediana_ivb": _mediana_cohorte(grupo, "InducedVertBreak"),
+                "mediana_hb": _mediana_cohorte(grupo, "HorzBreak"),
+                "percentil_stuff_a": _percentil_pitch(pitch_a, grupo, "stuff_plus"),
+                "percentil_stuff_b": _percentil_pitch(pitch_b, grupo, "stuff_plus"),
+                "percentil_location_a": _percentil_pitch(pitch_a, grupo, "location_plus"),
+                "percentil_location_b": _percentil_pitch(pitch_b, grupo, "location_plus"),
+                "percentil_velo_a": _percentil_pitch(pitch_a, grupo, "RelSpeed"),
+                "percentil_velo_b": _percentil_pitch(pitch_b, grupo, "RelSpeed"),
+                "grupo": grupo,
+            }
+        )
+    return filas
+
+
+def _puntos(cantidad: float) -> str:
+    numero = int(round(abs(cantidad)))
+    return f"{numero} punto" if numero == 1 else f"{numero} puntos"
+
+
+def _frase_pitcheo(fila: dict, nombre_a: str, nombre_b: str) -> str:
+    tipo = ETIQUETAS_TIPO.get(fila["tipo"], fila["tipo"])
+    mano = ETIQUETAS_MANO.get(fila["mano"], fila["mano"])
+    pitch_a = fila["a"]
+    pitch_b = fila["b"]
+    mediana = fila["mediana_stuff"]
+    tiene_equipo = np.isfinite(mediana) and fila["n_equipo"] > 0
+
+    if pitch_a and pitch_b:
+        ventaja = float(pitch_a["stuff_plus"]) - float(pitch_b["stuff_plus"])
+        if abs(ventaja) < 1:
+            quien = f"{nombre_a} y {nombre_b} quedan parejos"
+        elif ventaja > 0:
+            quien = f"{nombre_a} va {_puntos(ventaja)} arriba de {nombre_b}"
+        else:
+            quien = f"{nombre_b} va {_puntos(ventaja)} arriba de {nombre_a}"
+        frase = (
+            f"En {tipo} de {mano}, {quien} "
+            f"({nombre_a} {pitch_a['stuff_plus']:.0f}, {nombre_b} {pitch_b['stuff_plus']:.0f})."
+        )
+        if tiene_equipo and np.isfinite(fila["percentil_stuff_a"]) and np.isfinite(fila["percentil_stuff_b"]):
+            frase += (
+                f" Contra el equipo, {nombre_a} queda en el percentil {fila['percentil_stuff_a']:.0f} "
+                f"y {nombre_b} en el {fila['percentil_stuff_b']:.0f} "
+                f"(mediana {mediana:.0f}, {fila['n_equipo']} pitchers)."
+            )
+        return frase
+
+    unico = pitch_a or pitch_b
+    nombre = nombre_a if pitch_a else nombre_b
+    percentil = fila["percentil_stuff_a"] if pitch_a else fila["percentil_stuff_b"]
+    frase = f"Solo {nombre} trae {tipo} de {mano}, con Stuff+ {unico['stuff_plus']:.0f}."
+    if tiene_equipo and np.isfinite(percentil):
+        frase += (
+            f" En el equipo ese pitcheo queda en el percentil {percentil:.0f} "
+            f"(mediana {mediana:.0f})."
+        )
+    return frase
+
+
+def texto_duelo(
+    nombre_a: str,
+    repertorio_a: list[dict],
+    nombre_b: str,
+    repertorio_b: list[dict],
+    referencia: pd.DataFrame,
+    minimo: int,
+) -> str:
+    """Lectura para elegir entre dos reclutas, también contra el roster."""
+    if not repertorio_a and not repertorio_b:
+        return "Carga el repertorio de los dos reclutas para ver quién queda más cerca del equipo."
+    if not repertorio_a or not repertorio_b:
+        presente = nombre_a if repertorio_a else nombre_b
+        faltante = nombre_b if repertorio_a else nombre_a
+        return (
+            f"Ya está el repertorio de {presente}. "
+            f"Captura a {faltante} en el panel izquierdo para compararlos entre sí y contra el equipo."
+        )
+
+    stuff_a = stuff_ponderado(repertorio_a)
+    stuff_b = stuff_ponderado(repertorio_b)
+    location_a = location_ponderado(repertorio_a)
+    location_b = location_ponderado(repertorio_b)
+    delta = stuff_a - stuff_b
+    if abs(delta) < 1:
+        cabeza = (
+            f"{nombre_a} y {nombre_b} quedan parejos en Stuff+ del repertorio "
+            f"({stuff_a:.0f} y {stuff_b:.0f})."
+        )
+    elif delta > 0:
+        cabeza = (
+            f"{nombre_a} queda {_puntos(delta)} de Stuff+ por encima de {nombre_b} "
+            f"en el repertorio ({stuff_a:.0f} contra {stuff_b:.0f})."
+        )
+    else:
+        cabeza = (
+            f"{nombre_b} queda {_puntos(delta)} de Stuff+ por encima de {nombre_a} "
+            f"en el repertorio ({stuff_b:.0f} contra {stuff_a:.0f})."
+        )
+
+    if np.isfinite(location_a) and np.isfinite(location_b):
+        delta_loc = location_a - location_b
+        if abs(delta_loc) < 1:
+            cabeza += f" En Location+ también están parejos ({location_a:.0f} y {location_b:.0f})."
+        elif delta_loc > 0:
+            cabeza += f" En Location+, {nombre_a} va adelante ({location_a:.0f} contra {location_b:.0f})."
+        else:
+            cabeza += f" En Location+, {nombre_b} va adelante ({location_b:.0f} contra {location_a:.0f})."
+
+    detalles = [
+        _frase_pitcheo(fila, nombre_a, nombre_b)
+        for fila in filas_duelo(repertorio_a, repertorio_b, referencia, minimo)
+    ]
+    return cabeza + " " + " ".join(detalles)

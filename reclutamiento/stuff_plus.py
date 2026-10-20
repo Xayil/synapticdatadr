@@ -9,8 +9,15 @@ El notebook define
 X lleva velocidad, spin, IVB, quiebre horizontal, el residuo contra el
 modelo físico (ΔIVB, ΔHB), el factor de spin S, extensión, punto de
 liberación y densidad del aire. El tipo de lanzamiento y la mano entran
-como variables indicadoras. μ_p y σ_p se fijan con los lanzamientos de
-entrenamiento para no usar al recluta en la escala.
+como variables indicadoras.
+
+La escala ya no mezcla todos los tipos. El notebook la fija dentro de
+cada tipo T:
+
+    Stuff+ = 100 + 10 (p − μ_{p,T}) / σ_{p,T}
+
+100 es el lanzamiento promedio de ese tipo. μ y σ salen del entrenamiento.
+La ubicación no entra aquí: eso es Location+, en reclutamiento/location_plus.py.
 """
 
 from __future__ import annotations
@@ -28,6 +35,8 @@ from reclutamiento.fisica import (
     quiebre_modelo,
     signo_lado_brazo,
 )
+
+VERSION = "notebook-stuff-location-v2"
 
 ROOT = Path(__file__).resolve().parents[1]
 RUTA_DATOS = ROOT / "database" / "stuff_model_df.parquet"
@@ -78,6 +87,12 @@ COLUMNAS_BASE = [
     "HorzBreak",
     "VertApprAngle",
     "HorzApprAngle",
+    "PlateLocSide",
+    "PlateLocHeight",
+    "Balls",
+    "Strikes",
+    "count",
+    "BatterSide",
     "is_whiff",
 ]
 
@@ -97,6 +112,9 @@ METRICAS_PROMEDIO = [
     "HorzApprAngle",
     "stuff_plus",
     "p_whiff",
+    "location_plus",
+    "PlateLocSide",
+    "PlateLocHeight",
 ]
 
 
@@ -104,6 +122,14 @@ def stuff_plus_desde_probabilidad(probabilidad, mu_p: float, sigma_p: float):
     """Stuff+ = 100 + 10 (p − μ_p) / σ_p."""
     sigma = sigma_p if abs(sigma_p) > 1e-12 else 1.0
     return 100.0 + 10.0 * (np.asarray(probabilidad, dtype=float) - mu_p) / sigma
+
+
+def stuff_plus_por_tipo(probabilidad, tipos, mu_por_tipo: dict, sigma_por_tipo: dict, mu_p: float, sigma_p: float):
+    """Escala del notebook: cada tipo se compara contra su propio promedio."""
+    mu = np.array([mu_por_tipo.get(tipo, mu_p) for tipo in tipos], dtype=float)
+    sigma = np.array([sigma_por_tipo.get(tipo, sigma_p) for tipo in tipos], dtype=float)
+    sigma = np.where(np.abs(sigma) < 1e-12, 1.0, sigma)
+    return 100.0 + 10.0 * (np.asarray(probabilidad, dtype=float) - mu) / sigma
 
 
 def enriquecer(df: pd.DataFrame, altitud: str | None = None) -> pd.DataFrame:
@@ -303,20 +329,45 @@ def construir_artefactos(forzar: bool = False) -> dict:
     modelo = ModeloStuffPlus().fit(datos.iloc[indice_train].reset_index(drop=True), y[indice_train])
 
     p_train = modelo.probabilidades(datos.iloc[indice_train])
+    tipos_train = datos.iloc[indice_train]["AutoPitchType"].astype(str).to_numpy()
     mu_p = float(p_train.mean())
     sigma_p = float(p_train.std(ddof=0))
+    mu_por_tipo = {}
+    sigma_por_tipo = {}
+    for tipo in TIPOS_MODELO:
+        muestra = p_train[tipos_train == tipo]
+        if len(muestra) == 0:
+            continue
+        mu_por_tipo[tipo] = float(muestra.mean())
+        sigma_tipo = float(muestra.std(ddof=0))
+        sigma_por_tipo[tipo] = sigma_tipo if sigma_tipo > 1e-12 else 1.0
     p_test = modelo.probabilidades(datos.iloc[indice_test])
     auc = _auc(y[indice_test], p_test)
     perdida = _log_loss(y[indice_test], p_test)
     print(f"AUC de prueba: {auc:.3f}   log loss: {perdida:.3f}")
-    print(f"Escala Stuff+: mu_p={mu_p:.4f}  sigma_p={sigma_p:.4f}")
+    print(f"Escala global de referencia: mu_p={mu_p:.4f}  sigma_p={sigma_p:.4f}")
+    for tipo in TIPOS_MODELO:
+        if tipo in mu_por_tipo:
+            print(f"  {tipo}: mu_p={mu_por_tipo[tipo]:.4f}  sigma_p={sigma_por_tipo[tipo]:.4f}")
     for item in modelo.coeficientes():
         if item["variable"] in {"RelSpeed", "SpinRate", "InducedVertBreak", "HB_mano", "S", "intercepto"}:
             print(f"  beta {item['variable']}: {item['beta']:+.3f}")
 
     p_todo = modelo.probabilidades(datos)
     datos["p_whiff"] = p_todo
-    datos["stuff_plus"] = stuff_plus_desde_probabilidad(p_todo, mu_p, sigma_p)
+    datos["stuff_plus"] = stuff_plus_por_tipo(
+        p_todo,
+        datos["AutoPitchType"].astype(str).to_numpy(),
+        mu_por_tipo,
+        sigma_por_tipo,
+        mu_p,
+        sigma_p,
+    )
+
+    from reclutamiento.location_plus import entrenar_location
+
+    print("Entrenando Location+...")
+    estado_location, datos = entrenar_location(datos, indice_train, indice_test)
 
     agrupado = datos.groupby(
         ["pitcher_anon_id", "AutoPitchType", "PitcherThrows"],
@@ -327,7 +378,7 @@ def construir_artefactos(forzar: bool = False) -> dict:
     referencia = referencia.reset_index()
 
     artefacto = {
-        "version": "notebook-stuff-plus-v1",
+        "version": VERSION,
         "modelo": {
             "mu": modelo.mu_,
             "sigma": modelo.sigma_,
@@ -340,6 +391,9 @@ def construir_artefactos(forzar: bool = False) -> dict:
         },
         "mu_p": mu_p,
         "sigma_p": sigma_p,
+        "mu_p_tipo": mu_por_tipo,
+        "sigma_p_tipo": sigma_por_tipo,
+        "location": estado_location,
         "auc": auc,
         "log_loss": perdida,
         "n_train": int(len(indice_train)),
@@ -362,7 +416,10 @@ def construir_artefactos(forzar: bool = False) -> dict:
 def cargar_modelo() -> dict:
     if not RUTA_MODELO.exists() or not RUTA_REFERENCIA.exists():
         return construir_artefactos(forzar=True)
-    return joblib.load(RUTA_MODELO)
+    artefacto = joblib.load(RUTA_MODELO)
+    if artefacto.get("version") != VERSION or "location" not in artefacto or "mu_p_tipo" not in artefacto:
+        return construir_artefactos(forzar=True)
+    return artefacto
 
 
 def cargar_referencia() -> pd.DataFrame:
@@ -396,11 +453,12 @@ def puntuar_lanzamiento(datos: dict, artefacto: dict | None = None) -> dict:
     if not np.isfinite(X[FEATURES_NUM]).all(axis=None):
         raise ValueError("Faltan métricas físicas para calcular el Stuff+.")
     probabilidad = float(estimador_desde_artefacto(artefacto).probabilidades(frame)[0])
-    stuff = float(
-        stuff_plus_desde_probabilidad(probabilidad, artefacto["mu_p"], artefacto["sigma_p"])
-    )
+    tipo = str(datos.get("AutoPitchType"))
+    mu_tipo = artefacto.get("mu_p_tipo", {}).get(tipo, artefacto["mu_p"])
+    sigma_tipo = artefacto.get("sigma_p_tipo", {}).get(tipo, artefacto["sigma_p"])
+    stuff = float(stuff_plus_desde_probabilidad(probabilidad, mu_tipo, sigma_tipo))
     fila = frame.iloc[0]
-    return {
+    resultado = {
         "p_whiff": probabilidad,
         "stuff_plus": stuff,
         "delta_ivb": float(fila["delta_ivb"]),
@@ -410,6 +468,11 @@ def puntuar_lanzamiento(datos: dict, artefacto: dict | None = None) -> dict:
         "S": float(fila["S"]),
         "rho": float(fila["rho"]),
     }
+    if "location" in artefacto:
+        from reclutamiento.location_plus import puntuar_location
+
+        resultado.update(puntuar_location(datos, stuff, artefacto["location"]))
+    return resultado
 
 
 if __name__ == "__main__":
