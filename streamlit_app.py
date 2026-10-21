@@ -8,6 +8,7 @@ Stuff+ definido en modelos/Modelo_general_STUFF+.ipynb.
 from __future__ import annotations
 
 import html
+import re
 
 import numpy as np
 import pandas as pd
@@ -46,6 +47,8 @@ AZUL = "#1E4D8C"
 TINTA = "#1C1917"
 PIEDRA = "#78716C"
 CREMA = "#F6F3EE"
+COLORES_PITCHER = [ROJO, AZUL, "#1F7A4D", "#A6843D"]
+EJEMPLOS_PITCHER = ["00778", "00417", "", ""]
 
 ALTITUDES = {estadio["id"]: etiqueta_estadio(estadio) for estadio in ESTADIOS}
 
@@ -1782,6 +1785,318 @@ def tab_duelo(referencia: pd.DataFrame, minimo: int, vista_a: list[dict], vista_
     )
 
 
+def identificador_pitcher(valor: str) -> str:
+    """00778 y pitcher_00778 apuntan al mismo pitcher de la organización."""
+    texto = valor.strip()
+    if re.fullmatch(r"\d{1,5}", texto):
+        return f"pitcher_{int(texto):05d}"
+    return texto
+
+
+def _promedio_ponderado(valores, pesos) -> float:
+    numeros = np.asarray(valores, dtype=float)
+    cargas = np.asarray(pesos, dtype=float)
+    validos = np.isfinite(numeros) & np.isfinite(cargas) & (cargas > 0)
+    if not validos.any():
+        return float("nan")
+    return float(np.average(numeros[validos], weights=cargas[validos]))
+
+
+def _mediana_ponderada(valores, pesos) -> float:
+    pares = [
+        (float(valor), float(peso))
+        for valor, peso in zip(valores, pesos)
+        if np.isfinite(valor) and np.isfinite(peso) and peso > 0
+    ]
+    if not pares:
+        return float("nan")
+    pares.sort(key=lambda item: item[0])
+    mitad = sum(peso for _, peso in pares) / 2
+    acumulado = 0.0
+    for valor, peso in pares:
+        acumulado += peso
+        if acumulado >= mitad:
+            return valor
+    return pares[-1][0]
+
+
+def repertorio_organizacion(referencia: pd.DataFrame, seleccionados: list[str]) -> pd.DataFrame:
+    """Un renglón por pitcher y tipo, con el mismo resumen que el comparador."""
+    datos = referencia[referencia["pitcher_anon_id"].isin(seleccionados)].copy()
+    filas = []
+    if datos.empty:
+        return pd.DataFrame(filas)
+    for (pitcher, tipo), bloque in datos.groupby(["pitcher_anon_id", "AutoPitchType"], observed=True):
+        pesos = bloque["n_lanzamientos"].to_numpy(dtype=float)
+        manos = bloque["PitcherThrows"].dropna()
+        filas.append(
+            {
+                "pitcher_anon_id": pitcher,
+                "AutoPitchType": tipo,
+                "lanzamientos": int(np.nansum(pesos)),
+                "stuff_promedio": _promedio_ponderado(bloque["stuff_plus"], pesos),
+                "velocidad": _promedio_ponderado(bloque["RelSpeed"], pesos),
+                "spin": _promedio_ponderado(bloque["SpinRate"], pesos),
+                "ivb": _promedio_ponderado(bloque["InducedVertBreak"], pesos),
+                "hb": _promedio_ponderado(bloque["HorzBreak"], pesos),
+                "mano": manos.mode().iloc[0] if not manos.empty else "",
+            }
+        )
+    repertorio = pd.DataFrame(filas)
+    repertorio = repertorio[repertorio["lanzamientos"] > 0].copy()
+    totales = repertorio.groupby("pitcher_anon_id")["lanzamientos"].transform("sum")
+    repertorio["uso_%"] = repertorio["lanzamientos"] / totales * 100
+    return repertorio
+
+
+def resumen_organizacion(repertorio: pd.DataFrame, seleccionados: list[str]) -> pd.DataFrame:
+    filas = []
+    for pitcher in seleccionados:
+        bloque = repertorio[repertorio["pitcher_anon_id"] == pitcher]
+        pesos = bloque["lanzamientos"] if not bloque.empty else []
+        manos = bloque["mano"].replace("", np.nan).dropna() if not bloque.empty else pd.Series(dtype=object)
+        filas.append(
+            {
+                "pitcher_anon_id": pitcher,
+                "lanzamientos": int(bloque["lanzamientos"].sum()) if not bloque.empty else 0,
+                "stuff_promedio": _promedio_ponderado(bloque["stuff_promedio"], pesos) if not bloque.empty else float("nan"),
+                "stuff_mediana": _mediana_ponderada(bloque["stuff_promedio"], pesos) if not bloque.empty else float("nan"),
+                "stuff_maximo": float(bloque["stuff_promedio"].max()) if not bloque.empty else float("nan"),
+                "velocidad": _promedio_ponderado(bloque["velocidad"], pesos) if not bloque.empty else float("nan"),
+                "spin": _promedio_ponderado(bloque["spin"], pesos) if not bloque.empty else float("nan"),
+                "tipos": int(bloque["AutoPitchType"].nunique()) if not bloque.empty else 0,
+                "mano": manos.mode().iloc[0] if not manos.empty else "",
+            }
+        )
+    return pd.DataFrame(filas).set_index("pitcher_anon_id").reindex(seleccionados)
+
+
+def _etiqueta_id(pitcher: str) -> str:
+    return pitcher.removeprefix("pitcher_")
+
+
+def figura_stuff_pitchers(resumen: pd.DataFrame, seleccionados: list[str]) -> go.Figure:
+    figura = go.Figure(
+        go.Bar(
+            x=resumen.loc[seleccionados, "stuff_promedio"],
+            y=list(seleccionados),
+            orientation="h",
+            marker_color=[COLORES_PITCHER[i % len(COLORES_PITCHER)] for i in range(len(seleccionados))],
+            hovertemplate="%{y}<br>Stuff+ %{x:.1f}<extra></extra>",
+        )
+    )
+    figura.add_vline(x=100, line_dash="dash", line_color=PIEDRA)
+    figura.update_xaxes(title="Stuff+")
+    figura.update_yaxes(type="category")
+    return estilo(figura, "Stuff+ promedio por pitcher")
+
+
+def figura_tipos_pitchers(repertorio: pd.DataFrame, seleccionados: list[str], columna: str, titulo: str, eje: str) -> go.Figure:
+    figura = go.Figure()
+    for indice, pitcher in enumerate(seleccionados):
+        bloque = repertorio[repertorio["pitcher_anon_id"] == pitcher]
+        figura.add_trace(
+            go.Bar(
+                name=_etiqueta_id(pitcher),
+                x=[ETIQUETAS_TIPO.get(tipo, tipo) for tipo in bloque["AutoPitchType"]],
+                y=bloque[columna],
+                marker_color=COLORES_PITCHER[indice % len(COLORES_PITCHER)],
+                hovertemplate="%{x}<br>" + _etiqueta_id(pitcher) + "<br>%{y:.1f}<extra></extra>",
+            )
+        )
+    figura.update_layout(barmode="group")
+    if columna == "stuff_promedio":
+        figura.add_hline(y=100, line_dash="dash", line_color=PIEDRA)
+    figura.update_yaxes(title=eje)
+    return estilo(figura, titulo)
+
+
+def figura_arsenal(bloque: pd.DataFrame, columna: str, titulo: str, color: str) -> go.Figure:
+    ordenado = bloque.sort_values("lanzamientos", ascending=True)
+    figura = go.Figure(
+        go.Bar(
+            x=ordenado[columna],
+            y=[ETIQUETAS_TIPO.get(tipo, tipo) for tipo in ordenado["AutoPitchType"]],
+            orientation="h",
+            marker_color=color,
+            hovertemplate="%{y}<br>%{x:.1f}<extra></extra>",
+        )
+    )
+    if columna == "stuff_promedio":
+        figura.add_vline(x=100, line_dash="dash", line_color=PIEDRA)
+    return estilo(figura, titulo)
+
+
+def tab_comparador(referencia: pd.DataFrame):
+    """Comparación de 1 a 4 pitchers de la organización, como src/comparador_pitchers.py."""
+    st.subheader("Comparador de pitchers")
+    st.markdown(
+        '<p class="nota">Elige de uno a cuatro pitchers de la organización por su ID. '
+        "Puedes escribir 778 o pitcher_00778. El Stuff+ es el mismo del resto del dashboard: "
+        "el promedio de cada tipo de lanzamiento, ponderado por cuántos lanzamientos tiene.</p>",
+        unsafe_allow_html=True,
+    )
+
+    cantidad = st.selectbox(
+        "Número de pitchers a comparar",
+        [1, 2, 3, 4],
+        index=1,
+        key="n_pitchers_org",
+    )
+    columnas = st.columns(cantidad)
+    seleccionados = []
+    for indice in range(cantidad):
+        llave = f"pitcher_org_{indice}"
+        if llave not in st.session_state:
+            st.session_state[llave] = EJEMPLOS_PITCHER[indice]
+        with columnas[indice]:
+            valor = st.text_input(f"Pitcher {indice + 1}", key=llave, placeholder="00778")
+        if valor.strip():
+            seleccionados.append(identificador_pitcher(valor))
+
+    if not seleccionados:
+        st.info("Ingresa al menos un ID.")
+        return
+    if len(seleccionados) != len(set(seleccionados)):
+        st.warning("No repitas el mismo pitcher.")
+        return
+
+    disponibles = set(referencia["pitcher_anon_id"].dropna().unique())
+    no_encontrados = [pitcher for pitcher in seleccionados if pitcher not in disponibles]
+    if no_encontrados:
+        st.error("Pitchers sin Stuff+ disponible: " + ", ".join(no_encontrados))
+        return
+
+    repertorio = repertorio_organizacion(referencia, seleccionados)
+    resumen = resumen_organizacion(repertorio, seleccionados)
+
+    st.markdown("### Comparación general")
+    tarjetas = st.columns(len(seleccionados))
+    for indice, pitcher in enumerate(seleccionados):
+        fila = resumen.loc[pitcher]
+        mano = ETIQUETAS_MANO.get(fila["mano"], fila["mano"])
+        with tarjetas[indice]:
+            st.markdown(f"**{html.escape(pitcher)}**")
+            if mano:
+                st.caption(f"Pitcher {mano}")
+            st.metric("Stuff+ promedio", f"{fila['stuff_promedio']:.2f}")
+            st.metric("Lanzamientos", f"{int(fila['lanzamientos']):,}")
+            st.metric("Tipos de pitcheo", int(fila["tipos"]))
+
+    st.plotly_chart(figura_stuff_pitchers(resumen, seleccionados), width="stretch")
+
+    st.markdown("### Estadísticas comparativas")
+    tabla = resumen.reset_index().rename(
+        columns={
+            "pitcher_anon_id": "Pitcher",
+            "lanzamientos": "Lanzamientos",
+            "stuff_promedio": "Stuff+ promedio",
+            "stuff_mediana": "Stuff+ mediano",
+            "stuff_maximo": "Stuff+ máximo",
+            "velocidad": "Velocidad",
+            "spin": "Spin",
+            "tipos": "Tipos",
+            "mano": "Mano",
+        }
+    )
+    tabla["Mano"] = tabla["Mano"].map(lambda valor: "Derecha" if valor == "Right" else "Izquierda" if valor == "Left" else valor)
+    st.dataframe(
+        tabla,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Lanzamientos": st.column_config.NumberColumn(format="%d"),
+            "Stuff+ promedio": st.column_config.NumberColumn(format="%.2f"),
+            "Stuff+ mediano": st.column_config.NumberColumn(format="%.2f"),
+            "Stuff+ máximo": st.column_config.NumberColumn(format="%.2f"),
+            "Velocidad": st.column_config.NumberColumn(format="%.2f mph"),
+            "Spin": st.column_config.NumberColumn(format="%.0f rpm"),
+            "Tipos": st.column_config.NumberColumn(format="%d"),
+        },
+    )
+
+    st.markdown("### Comparación de repertorios")
+    st.plotly_chart(
+        figura_tipos_pitchers(repertorio, seleccionados, "stuff_promedio", "Stuff+ por tipo de lanzamiento", "Stuff+"),
+        width="stretch",
+    )
+
+    st.markdown("#### Análisis individual del repertorio")
+    for indice, pitcher in enumerate(seleccionados):
+        bloque = repertorio[repertorio["pitcher_anon_id"] == pitcher].sort_values("lanzamientos", ascending=False)
+        color = COLORES_PITCHER[indice % len(COLORES_PITCHER)]
+        with st.expander(f"{pitcher} — Análisis completo", expanded=True):
+            st.markdown("##### Composición del arsenal")
+            st.plotly_chart(figura_arsenal(bloque, "uso_%", "Uso del arsenal (%)", color), width="stretch")
+            st.markdown("##### Calidad de cada lanzamiento")
+            st.plotly_chart(figura_arsenal(bloque, "stuff_promedio", "Stuff+ de cada tipo", color), width="stretch")
+            st.markdown("##### Características físicas")
+            fisico = pd.DataFrame(
+                {
+                    "Tipo": [ETIQUETAS_TIPO.get(tipo, tipo) for tipo in bloque["AutoPitchType"]],
+                    "Lanzamientos": bloque["lanzamientos"].to_numpy(),
+                    "Uso %": bloque["uso_%"].to_numpy(),
+                    "Stuff+": bloque["stuff_promedio"].to_numpy(),
+                    "Velocidad": bloque["velocidad"].to_numpy(),
+                    "Spin": bloque["spin"].to_numpy(),
+                    "IVB": bloque["ivb"].to_numpy(),
+                    "HorzBreak": bloque["hb"].to_numpy(),
+                }
+            )
+            st.dataframe(
+                fisico,
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Lanzamientos": st.column_config.NumberColumn(format="%d"),
+                    "Uso %": st.column_config.NumberColumn(format="%.1f"),
+                    "Stuff+": st.column_config.NumberColumn(format="%.2f"),
+                    "Velocidad": st.column_config.NumberColumn(format="%.2f"),
+                    "Spin": st.column_config.NumberColumn(format="%.0f"),
+                    "IVB": st.column_config.NumberColumn(format="%.2f"),
+                    "HorzBreak": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
+            principal = bloque.iloc[0]
+            st.info(
+                f"Lanzamiento principal: {ETIQUETAS_TIPO.get(principal['AutoPitchType'], principal['AutoPitchType'])} | "
+                f"Uso: {principal['uso_%']:.1f}% | Stuff+: {principal['stuff_promedio']:.2f}"
+            )
+            evaluables = bloque[bloque["lanzamientos"] >= 30]
+            if not evaluables.empty:
+                mejor = evaluables.loc[evaluables["stuff_promedio"].idxmax()]
+                st.success(
+                    f"Mayor Stuff+ entre lanzamientos con al menos 30 observaciones: "
+                    f"{ETIQUETAS_TIPO.get(mejor['AutoPitchType'], mejor['AutoPitchType'])} ({mejor['stuff_promedio']:.2f})"
+                )
+            pocos = bloque[bloque["lanzamientos"] < 30]
+            if not pocos.empty:
+                st.warning(
+                    "Algunos tipos tienen menos de 30 lanzamientos. Sus promedios deben interpretarse con cautela."
+                )
+
+    st.markdown("### Comparación directa por tipo de pitcheo")
+    comparacion = repertorio.pivot_table(
+        index="AutoPitchType",
+        columns="pitcher_anon_id",
+        values="stuff_promedio",
+        observed=True,
+    ).reindex(columns=seleccionados)
+    comparacion.index = [ETIQUETAS_TIPO.get(tipo, tipo) for tipo in comparacion.index]
+    comparacion.columns = [_etiqueta_id(pitcher) for pitcher in comparacion.columns]
+    st.dataframe(comparacion.round(2), width="stretch")
+
+    st.markdown("### Comparación de utilización")
+    st.plotly_chart(
+        figura_tipos_pitchers(repertorio, seleccionados, "uso_%", "Uso de cada tipo (%)", "Uso %"),
+        width="stretch",
+    )
+    st.caption(
+        "Las puntuaciones Stuff+ provienen del modelo del dashboard. "
+        "Este comparador agrupa a los pitchers de la organización y no modifica el modelo ni sus parámetros."
+    )
+
+
 def main():
     st.set_page_config(
         page_title="Reclutamiento · DRITAM",
@@ -1865,8 +2180,8 @@ def main():
     vista_b = repertorio_en_escenario(st.session_state.reclutas["b"]["repertorio"], estadio, modelo)
     vista = vista_a if st.session_state.activo == "a" else vista_b
 
-    captura, comparacion, decision, duelo = st.tabs(
-        ["1 · Captura", "2 · Comparación", "3 · Decisión", "4 · Entre dos"]
+    captura, comparacion, decision, duelo, pitchers = st.tabs(
+        ["1 · Captura", "2 · Comparación", "3 · Decisión", "4 · Entre dos", "5 · Pitchers"]
     )
     with captura:
         tab_captura(modelo, referencia, vista)
@@ -1876,6 +2191,8 @@ def main():
         tab_decision(modelo, referencia, minimo, vista)
     with duelo:
         tab_duelo(referencia, minimo, vista_a, vista_b)
+    with pitchers:
+        tab_comparador(referencia)
 
 
 if __name__ == "__main__":
