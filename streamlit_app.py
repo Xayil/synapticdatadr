@@ -39,6 +39,7 @@ from reclutamiento.stuff_plus import (
     TIPOS_MODELO,
     cargar_modelo,
     cargar_referencia,
+    lanzamientos_en_escenario,
     puntuar_lanzamiento,
 )
 
@@ -1984,15 +1985,21 @@ def figura_arsenal(bloque: pd.DataFrame, columna: str, titulo: str, color: str) 
     return estilo(figura, titulo)
 
 
-def tab_comparador(referencia: pd.DataFrame, vista_a: list[dict], vista_b: list[dict]):
+def tab_comparador(
+    referencia: pd.DataFrame,
+    vista_a: list[dict],
+    vista_b: list[dict],
+    estadio: str,
+    modelo: dict,
+):
     """De uno a cuatro lugares: cada uno puede ser un recluta o un pitcher del equipo."""
     vistas = {"a": vista_a, "b": vista_b}
     st.subheader("Comparador de pitchers")
     st.markdown(
         '<p class="nota">Cada lugar puede ser un recluta o un jugador del equipo. '
-        "El recluta entra con el repertorio capturado y con el aire del estadio del escenario. "
-        "El jugador del equipo se busca por ID: 778 o pitcher_00778. "
-        "El Stuff+ de los dos lados es el del mismo modelo.</p>",
+        "Los dos se recalculan con el aire del estadio del escenario: velocidad, giro y quiebre "
+        "medidos se quedan, y el Stuff+ sigue a ese aire. "
+        "El jugador del equipo se busca por ID: 778 o pitcher_00778.</p>",
         unsafe_allow_html=True,
     )
 
@@ -2053,7 +2060,8 @@ def tab_comparador(referencia: pd.DataFrame, vista_a: list[dict], vista_b: list[
 
     partes = []
     if ids_equipo:
-        partes.append(repertorio_organizacion(referencia, ids_equipo))
+        vivo = lanzamientos_en_escenario(ids_equipo, estadio, modelo, referencia)
+        partes.append(repertorio_organizacion(vivo, ids_equipo))
     for identificador in seleccionados:
         if identificador.startswith("recluta_"):
             partes.append(repertorio_recluta(vistas[identificador.removeprefix("recluta_")], identificador))
@@ -2198,8 +2206,8 @@ def tab_comparador(referencia: pd.DataFrame, vista_a: list[dict], vista_b: list[
         width="stretch",
     )
     st.caption(
-        "Las puntuaciones Stuff+ provienen del modelo del dashboard. "
-        "El recluta usa el aire del estadio del escenario. El jugador del equipo conserva el Stuff+ de su historial."
+        "El Stuff+ del recluta y el del jugador del equipo salen del mismo modelo, "
+        "con el aire del estadio del escenario. Velocidad, giro y quiebre medidos se quedan iguales."
     )
 
 
@@ -2243,11 +2251,12 @@ def main():
             list(ALTITUDES),
             format_func=lambda valor: ALTITUDES[valor],
             key="estadio_escenario",
-            help="Al cambiar el estadio, Stuff+ y Location+ de los dos reclutas se recalculan al momento. "
-            "Velocidad, giro, quiebre y ubicación del reporte se quedan iguales.",
+            help="Al cambiar el estadio se recalculan el Stuff+ y el Location+ de los reclutas, "
+            "y el Stuff+ de los jugadores del equipo en Pitchers. "
+            "Velocidad, giro, quiebre y ubicación medidos se quedan iguales.",
         )
         st.caption(
-            "El estadio y el recluta activo son en vivo. Entre dos compara a los dos entre sí y contra el equipo."
+            "El estadio es en vivo para los reclutas y para los jugadores del equipo en Pitchers."
         )
         if st.button("Limpiar este repertorio", disabled=not repertorio_en_edicion()):
             st.session_state.reclutas[st.session_state.activo]["repertorio"] = []
@@ -2298,7 +2307,7 @@ def main():
     with duelo:
         tab_duelo(referencia, minimo, vista_a, vista_b)
     with pitchers:
-        tab_comparador(referencia, vista_a, vista_b)
+        tab_comparador(referencia, vista_a, vista_b, estadio, modelo)
 
 
 if __name__ == "__main__":

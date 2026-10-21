@@ -22,6 +22,7 @@ La ubicación no entra aquí: eso es Location+, en reclutamiento/location_plus.p
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 import joblib
@@ -420,6 +421,123 @@ def cargar_modelo() -> dict:
     if artefacto.get("version") != VERSION or "location" not in artefacto or "mu_p_tipo" not in artefacto:
         return construir_artefactos(forzar=True)
     return artefacto
+
+
+_COLUMNAS_ESCENARIO = [
+    "pitcher_anon_id",
+    "AutoPitchType",
+    "PitcherThrows",
+    "RelSpeed",
+    "SpinRate",
+    "InducedVertBreak",
+    "HorzBreak",
+    "n_lanzamientos",
+    "stuff_plus",
+]
+
+
+def _vacio_escenario() -> pd.DataFrame:
+    return pd.DataFrame(columns=_COLUMNAS_ESCENARIO)
+
+
+@lru_cache(maxsize=16)
+def _pitches_validos(ids: tuple[str, ...]) -> pd.DataFrame:
+    """Lanzamientos ya filtrados de esos pitchers. El aire se aplica después."""
+    if not ids or not RUTA_DATOS.exists():
+        return _vacio_escenario()
+    bruto = pd.read_parquet(
+        RUTA_DATOS,
+        columns=COLUMNAS_BASE,
+        filters=[("pitcher_anon_id", "in", list(ids))],
+    )
+    return _filtrar_entrenamiento(bruto)
+
+
+def lanzamientos_en_escenario(
+    ids: list[str],
+    estadio: str,
+    artefacto: dict | None = None,
+    referencia: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Stuff+ de los pitchers del equipo con el aire del estadio elegido.
+
+    Cada lanzamiento conserva su velocidad, giro y quiebre. Cambia la densidad
+    y, con ella, el quiebre que el modelo físico esperaba y el Stuff+.
+    """
+    ids_limpios = tuple(sorted({identificador for identificador in ids if identificador}))
+    if not ids_limpios:
+        return _vacio_escenario()
+    if artefacto is None:
+        artefacto = cargar_modelo()
+    aire = estadio or ALTITUD_DEFAULT
+    try:
+        base = _pitches_validos(ids_limpios).copy()
+    except (OSError, ValueError, KeyError):
+        base = _vacio_escenario()
+
+    partes = []
+    if not base.empty and "pitcher_anon_id" in base.columns:
+        puntuados = enriquecer(base, altitud=aire)
+        completos = np.isfinite(puntuados[FEATURES_NUM]).all(axis=1)
+        puntuados = puntuados.loc[completos].copy()
+        if not puntuados.empty:
+            probabilidad = estimador_desde_artefacto(artefacto).probabilidades(puntuados)
+            puntuados["stuff_plus"] = stuff_plus_por_tipo(
+                probabilidad,
+                puntuados["AutoPitchType"].astype(str).to_numpy(),
+                artefacto.get("mu_p_tipo", {}),
+                artefacto.get("sigma_p_tipo", {}),
+                artefacto["mu_p"],
+                artefacto["sigma_p"],
+            )
+            puntuados["n_lanzamientos"] = 1
+            partes.append(puntuados[_COLUMNAS_ESCENARIO])
+
+    encontrados = set(partes[0]["pitcher_anon_id"]) if partes else set()
+    faltan = [identificador for identificador in ids_limpios if identificador not in encontrados]
+    if faltan and referencia is not None:
+        partes.append(_perfil_en_escenario(referencia, faltan, aire, artefacto))
+    if not partes:
+        return _vacio_escenario()
+    return pd.concat(partes, ignore_index=True)
+
+
+def _perfil_en_escenario(
+    referencia: pd.DataFrame,
+    ids: list[str],
+    estadio: str,
+    artefacto: dict,
+) -> pd.DataFrame:
+    """Si no hay lanzamiento suelto, el promedio del tipo se califica en ese aire."""
+    datos = referencia[referencia["pitcher_anon_id"].isin(ids)].copy()
+    if datos.empty:
+        return _vacio_escenario()
+    stuff = []
+    for _, fila in datos.iterrows():
+        campos = {columna: fila[columna] for columna in fila.index if columna in {
+            "AutoPitchType",
+            "PitcherThrows",
+            "RelSpeed",
+            "EffectiveVelo",
+            "ZoneSpeed",
+            "SpinRate",
+            "SpinAxis",
+            "RelHeight",
+            "RelSide",
+            "Extension",
+            "InducedVertBreak",
+            "HorzBreak",
+            "VertBreak",
+            "PlateLocSide",
+            "PlateLocHeight",
+        }}
+        campos["altitude_category"] = estadio
+        try:
+            stuff.append(puntuar_lanzamiento(campos, artefacto)["stuff_plus"])
+        except ValueError:
+            stuff.append(fila["stuff_plus"])
+    datos["stuff_plus"] = stuff
+    return datos[_COLUMNAS_ESCENARIO].reset_index(drop=True)
 
 
 def cargar_referencia() -> pd.DataFrame:
