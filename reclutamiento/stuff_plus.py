@@ -447,7 +447,7 @@ def _pitches_validos(ids: tuple[str, ...]) -> pd.DataFrame:
         return _vacio_escenario()
     bruto = pd.read_parquet(
         RUTA_DATOS,
-        columns=COLUMNAS_BASE,
+        columns=list(dict.fromkeys(COLUMNAS_BASE + ["Outs"])),
         filters=[("pitcher_anon_id", "in", list(ids))],
     )
     return _filtrar_entrenamiento(bruto)
@@ -458,6 +458,7 @@ def lanzamientos_en_escenario(
     estadio: str,
     artefacto: dict | None = None,
     referencia: pd.DataFrame | None = None,
+    pitching: dict | None = None,
 ) -> pd.DataFrame:
     """Stuff+ de los pitchers del equipo con el aire del estadio elegido.
 
@@ -491,7 +492,14 @@ def lanzamientos_en_escenario(
                 artefacto["sigma_p"],
             )
             puntuados["n_lanzamientos"] = 1
-            partes.append(puntuados[_COLUMNAS_ESCENARIO])
+            if pitching is not None:
+                from reclutamiento.pitching_plus import completar_capas
+
+                puntuados = completar_capas(puntuados, artefacto, pitching)
+            columnas = list(_COLUMNAS_ESCENARIO)
+            if "pitching_plus" in puntuados.columns:
+                columnas.append("pitching_plus")
+            partes.append(puntuados[columnas])
 
     encontrados = set(partes[0]["pitcher_anon_id"]) if partes else set()
     faltan = [identificador for identificador in ids_limpios if identificador not in encontrados]

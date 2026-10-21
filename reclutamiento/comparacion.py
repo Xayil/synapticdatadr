@@ -124,6 +124,16 @@ def stuff_ponderado(repertorio: list[dict]) -> float:
     return float(np.average(valores, weights=pesos))
 
 
+def pitching_ponderado(repertorio: list[dict]) -> float:
+    """Promedio de Pitching+ con los mismos pesos que el Stuff+."""
+    con_valor = [fila for fila in repertorio if _finito(fila.get("pitching_plus"))]
+    if not con_valor:
+        return float("nan")
+    return stuff_ponderado(
+        [{**fila, "stuff_plus": fila["pitching_plus"]} for fila in con_valor]
+    )
+
+
 def location_ponderado(repertorio: list[dict]) -> float:
     """Promedio de Location+ con los mismos pesos que el Stuff+."""
     con_ubicacion = [fila for fila in repertorio if _finito(fila.get("location_plus"))]

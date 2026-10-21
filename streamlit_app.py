@@ -23,6 +23,7 @@ from reclutamiento.comparacion import (
     ficha_comparacion,
     filas_duelo,
     location_ponderado,
+    pitching_ponderado,
     stuff_ponderado,
     texto_decision,
     texto_duelo,
@@ -35,6 +36,11 @@ from reclutamiento.fisica import (
     tilt_a_spin_axis,
 )
 from reclutamiento.location_plus import grilla_location
+from reclutamiento.pitching_plus import (
+    cargar_pitching,
+    puntuar_pitching,
+    referencia_recta,
+)
 from reclutamiento.stuff_plus import (
     TIPOS_MODELO,
     cargar_modelo,
@@ -406,7 +412,7 @@ def perfil_mediano(referencia: pd.DataFrame, modelo: dict) -> list[dict]:
             "Strikes": 1,
             "BatterSide": "Right",
             "uso_pct": uso,
-            "n_lanzamientos": None,
+            "n_lanzamientos": 1,
         }
         for columna in (
             "RelSpeed",
@@ -843,8 +849,14 @@ def repertorio_en_edicion() -> list[dict]:
     return st.session_state.reclutas[st.session_state.activo]["repertorio"]
 
 
-def repertorio_en_escenario(repertorio: list[dict], estadio: str, modelo: dict) -> list[dict]:
-    """Mismos pitcheos, recalculados con el aire del estadio que el reclutador está probando."""
+def repertorio_en_escenario(
+    repertorio: list[dict],
+    estadio: str,
+    modelo: dict,
+    pitching: dict | None = None,
+    outs: int = 0,
+) -> list[dict]:
+    """Mismos pitcheos, recalculados con el aire y los outs que el reclutador está probando."""
     vista = []
     for fila in repertorio:
         copia = dict(fila)
@@ -857,6 +869,10 @@ def repertorio_en_escenario(repertorio: list[dict], estadio: str, modelo: dict) 
         except ValueError:
             pass
         vista.append(copia)
+    if pitching is not None and vista:
+        recta = referencia_recta(vista)
+        for copia in vista:
+            copia.update(puntuar_pitching(copia, pitching, recta, outs))
     return vista
 
 
@@ -883,6 +899,8 @@ def etiqueta_pitcheo(fila: dict) -> str:
     texto = f"{tipo} · {mano} · {fila['RelSpeed']:.1f} mph · Stuff+ {fila['stuff_plus']:.0f}"
     if fila.get("location_plus") is not None and np.isfinite(fila["location_plus"]):
         texto += f" · Location+ {fila['location_plus']:.0f}"
+    if fila.get("pitching_plus") is not None and np.isfinite(fila["pitching_plus"]):
+        texto += f" · Pitching+ {fila['pitching_plus']:.0f}"
     return texto
 
 
@@ -1233,7 +1251,10 @@ def tab_captura(modelo: dict, referencia: pd.DataFrame, vista: list[dict]):
                 )
 
             st.markdown("**Ubicación en el plato**")
-            st.caption("Location+ necesita el punto donde cruzó el plato. Si lo dejas vacío, solo se calcula el Stuff+.")
+            st.caption(
+                "Location+ necesita el punto donde cruzó el plato. Si lo dejas vacío, el Stuff+ se calcula igual "
+                "y el Pitching+ usa la ubicación mediana del entrenamiento."
+            )
             u1, u2, u3, u4, u5 = st.columns(5)
             with u1:
                 plate_side = numero(
@@ -1385,6 +1406,7 @@ def tab_captura(modelo: dict, referencia: pd.DataFrame, vista: list[dict]):
                 "HorzBreak": fila["HorzBreak"],
                 "Stuff+": fila["stuff_plus"],
                 "Location+": fila.get("location_plus"),
+                "Pitching+": fila.get("pitching_plus"),
                 "Uso %": fila.get("uso_pct"),
                 "n": fila.get("n_lanzamientos"),
             }
@@ -1402,6 +1424,7 @@ def tab_captura(modelo: dict, referencia: pd.DataFrame, vista: list[dict]):
             "HorzBreak": st.column_config.NumberColumn(format="%.1f in"),
             "Stuff+": st.column_config.NumberColumn(format="%.1f"),
             "Location+": st.column_config.NumberColumn(format="%.1f"),
+            "Pitching+": st.column_config.NumberColumn(format="%.1f"),
             "Uso %": st.column_config.NumberColumn(format="%.0f"),
             "n": st.column_config.NumberColumn(format="%.0f"),
         },
@@ -1483,6 +1506,15 @@ def tab_comparacion(modelo: dict, referencia: pd.DataFrame, minimo: int, vista: 
         "Percentil de Location+",
         "—" if not np.isfinite(percentil_loc) else f"{percentil_loc:.0f}",
     )
+    pitching = elegido.get("pitching_plus")
+    tiene_pitching = pitching is not None and np.isfinite(pitching)
+    if tiene_pitching:
+        st.metric(
+            "Pitching+",
+            f"{pitching:.0f}",
+            f"{pitching - 100:+.0f} vs 100",
+            help="100 es el lanzamiento promedio. Más alto es más valor esperado para el pitcher.",
+        )
 
     st.markdown(
         f'<p class="nota">El modelo físico esperaba IVB de {elegido["ivb_modelo"]:.1f} in '
@@ -1531,7 +1563,7 @@ def tab_comparacion(modelo: dict, referencia: pd.DataFrame, minimo: int, vista: 
     )
 
 
-def tab_decision(modelo: dict, referencia: pd.DataFrame, minimo: int, vista: list[dict]):
+def tab_decision(modelo: dict, referencia: pd.DataFrame, minimo: int, vista: list[dict], pitching: dict | None = None):
     repertorio = vista
     st.subheader(f"Stuff+ y recomendación · {nombre_visible(st.session_state.activo)}")
     st.markdown(
@@ -1562,11 +1594,19 @@ def tab_decision(modelo: dict, referencia: pd.DataFrame, minimo: int, vista: lis
         help=f"Se calcula {como}. 100 es el promedio de ese tipo de lanzamiento.",
     )
     global_location = location_ponderado(repertorio)
+    global_pitching = pitching_ponderado(repertorio)
+    metrica_loc, metrica_pitch = st.columns(2)
     if np.isfinite(global_location):
-        st.metric(
+        metrica_loc.metric(
             "Location+ del repertorio",
             f"{global_location:.0f}",
             help="100 es la ubicación típica del tipo, después de descontar el Stuff+.",
+        )
+    if np.isfinite(global_pitching):
+        metrica_pitch.metric(
+            "Pitching+ del repertorio",
+            f"{global_pitching:.0f}",
+            help="100 es el valor esperado promedio. Más alto favorece al pitcher.",
         )
 
     st.plotly_chart(figura_stuff(repertorio, referencia, minimo), width="stretch")
@@ -1589,6 +1629,8 @@ def tab_decision(modelo: dict, referencia: pd.DataFrame, minimo: int, vista: lis
                     f"En ese punto del plato el modelo ve {fila['p_location'] * 100:.1f}% de whiff, "
                     f"contra {fila['p_location_ref'] * 100:.1f}% en la ubicación típica del tipo."
                 )
+            if fila.get("pitching_plus") is not None and np.isfinite(fila["pitching_plus"]):
+                st.caption(f"Pitching+ {fila['pitching_plus']:.0f}.")
 
     with st.expander("Cómo se calcula este Stuff+"):
         st.markdown(
@@ -1605,6 +1647,8 @@ El vector usa velocidad de salida, spin, IVB, quiebre horizontal (puesto en el m
 
 Location+ usa otra probabilidad: la del whiff dadas la ubicación, la cuenta, la mano del bateador, la mano del pitcher y el Stuff+ ya calculado. Se resta la probabilidad de la ubicación típica de ese tipo y esa diferencia se pone en la misma escala de 100. Así un pitcheo con mucho Stuff+ no se lleva el crédito de la ubicación.
 
+Pitching+ es la capa 3. Primero se arma el valor de cada lanzamiento histórico: carreras esperadas antes, menos las que se anotaron, menos las carreras esperadas después. Ese valor se explica con Stuff+, Location+, la cuenta, los outs, la diferencia del pitcheo contra la recta del mismo pitcher y la densidad del aire. `Pitching+ = 100 + 10 × (RV esperado − μ) / σ`. 100 es el promedio del entrenamiento y un número más alto favorece al pitcher.
+
 Los coeficientes son asociaciones dentro del modelo, no efectos causales. Velocidad, spin rate y el factor S comparten información, porque S se arma con las otras dos, así que esos tres betas no se leen por separado.
             """
         )
@@ -1613,6 +1657,12 @@ Los coeficientes son asociaciones dentro del modelo, no efectos causales. Veloci
             f"{modelo['n_test']:,}. AUC de prueba: {modelo['auc']:.3f}. "
             f"Tasa de whiff en la base: {modelo['whiff_rate'] * 100:.1f}%."
         )
+        if pitching is not None:
+            st.caption(
+                f"Pitching+ se entrenó con {pitching['n_train']:,} lanzamientos de 2024 y 2025 "
+                f"y se probó en {pitching['n_test']:,} de 2026. "
+                f"MAE {pitching['mae']:.3f} carreras por lanzamiento, RMSE {pitching['rmse']:.3f}."
+            )
         def nombre_beta(variable: str) -> str:
             if variable in NOMBRES_BETA:
                 return NOMBRES_BETA[variable]
@@ -1711,6 +1761,11 @@ def tab_duelo(referencia: pd.DataFrame, minimo: int, vista_a: list[dict], vista_
     m2.metric(f"Stuff+ · {nombre_b}", _numero(stuff_b, 0))
     m3.metric(f"Location+ · {nombre_a}", _numero(location_a, 0))
     m4.metric(f"Location+ · {nombre_b}", _numero(location_b, 0))
+    pitching_a = pitching_ponderado(vista_a)
+    pitching_b = pitching_ponderado(vista_b)
+    p1, p2 = st.columns(2)
+    p1.metric(f"Pitching+ · {nombre_a}", _numero(pitching_a, 0))
+    p2.metric(f"Pitching+ · {nombre_b}", _numero(pitching_b, 0))
 
     if not vista_a and not vista_b:
         return
@@ -1754,6 +1809,8 @@ def tab_duelo(referencia: pd.DataFrame, minimo: int, vista_a: list[dict], vista_
             )
             if np.isfinite(pitch.get("location_plus", np.nan)):
                 st.caption(f"Location+ {pitch['location_plus']:.0f}")
+            if np.isfinite(pitch.get("pitching_plus", np.nan)):
+                st.caption(f"Pitching+ {pitch['pitching_plus']:.0f}")
 
     ficha_a = ficha_comparacion(pitch_a, elegido["grupo"]) if pitch_a else None
     ficha_b = ficha_comparacion(pitch_b, elegido["grupo"]) if pitch_b else None
@@ -1841,6 +1898,11 @@ def repertorio_organizacion(referencia: pd.DataFrame, seleccionados: list[str]) 
                 "ivb": _promedio_ponderado(bloque["InducedVertBreak"], pesos),
                 "hb": _promedio_ponderado(bloque["HorzBreak"], pesos),
                 "mano": manos.mode().iloc[0] if not manos.empty else "",
+                "pitching_promedio": (
+                    _promedio_ponderado(bloque["pitching_plus"], pesos)
+                    if "pitching_plus" in bloque.columns
+                    else float("nan")
+                ),
             }
         )
     repertorio = pd.DataFrame(filas)
@@ -1848,6 +1910,20 @@ def repertorio_organizacion(referencia: pd.DataFrame, seleccionados: list[str]) 
     totales = repertorio.groupby("pitcher_anon_id")["lanzamientos"].transform("sum")
     repertorio["uso_%"] = repertorio["lanzamientos"] / totales * 100
     return repertorio
+
+
+def _conteo_fila(fila: dict) -> float:
+    """Un renglón sin muestra declarada es un lanzamiento que ya se capturó."""
+    crudo = fila.get("n_lanzamientos")
+    if crudo is None:
+        return 1.0
+    try:
+        valor = float(crudo)
+    except (TypeError, ValueError):
+        return 1.0
+    if not np.isfinite(valor) or valor <= 0:
+        return 1.0
+    return valor
 
 
 def repertorio_recluta(vista: list[dict], identificador: str) -> pd.DataFrame:
@@ -1865,6 +1941,7 @@ def repertorio_recluta(vista: list[dict], identificador: str) -> pd.DataFrame:
         bloque = grupos[tipo]
         usos = np.array([float(fila.get("uso_pct") or 0) for fila in bloque], dtype=float)
         cuentas = np.array([float(fila.get("n_lanzamientos") or 0) for fila in bloque], dtype=float)
+        conteo = np.array([_conteo_fila(fila) for fila in bloque], dtype=float)
         if np.nansum(usos) > 0:
             pesos = usos
         elif np.nansum(cuentas) > 0:
@@ -1876,13 +1953,17 @@ def repertorio_recluta(vista: list[dict], identificador: str) -> pd.DataFrame:
             {
                 "pitcher_anon_id": identificador,
                 "AutoPitchType": tipo,
-                "lanzamientos": int(np.nansum(cuentas)),
+                "lanzamientos": int(round(float(np.nansum(conteo)))),
                 "stuff_promedio": _promedio_ponderado([fila["stuff_plus"] for fila in bloque], pesos),
                 "velocidad": _promedio_ponderado([fila["RelSpeed"] for fila in bloque], pesos),
                 "spin": _promedio_ponderado([fila["SpinRate"] for fila in bloque], pesos),
                 "ivb": _promedio_ponderado([fila["InducedVertBreak"] for fila in bloque], pesos),
                 "hb": _promedio_ponderado([fila["HorzBreak"] for fila in bloque], pesos),
                 "mano": manos[0] if manos else "",
+                "pitching_promedio": _promedio_ponderado(
+                    [fila.get("pitching_plus", np.nan) for fila in bloque],
+                    pesos,
+                ),
                 "uso_directo": float(np.nansum(usos)),
             }
         )
@@ -1920,6 +2001,11 @@ def resumen_organizacion(repertorio: pd.DataFrame, seleccionados: list[str]) -> 
                 "spin": _promedio_ponderado(bloque["spin"], pesos) if not bloque.empty else float("nan"),
                 "tipos": int(bloque["AutoPitchType"].nunique()) if not bloque.empty else 0,
                 "mano": manos.mode().iloc[0] if not manos.empty else "",
+                "pitching_promedio": (
+                    _promedio_ponderado(bloque["pitching_promedio"], pesos)
+                    if not bloque.empty and "pitching_promedio" in bloque.columns
+                    else float("nan")
+                ),
             }
         )
     return pd.DataFrame(filas).set_index("pitcher_anon_id").reindex(seleccionados)
@@ -1991,6 +2077,7 @@ def tab_comparador(
     vista_b: list[dict],
     estadio: str,
     modelo: dict,
+    pitching: dict | None = None,
 ):
     """De uno a cuatro lugares: cada uno puede ser un recluta o un pitcher del equipo."""
     vistas = {"a": vista_a, "b": vista_b}
@@ -1998,7 +2085,7 @@ def tab_comparador(
     st.markdown(
         '<p class="nota">Cada lugar puede ser un recluta o un jugador del equipo. '
         "Los dos se recalculan con el aire del estadio del escenario: velocidad, giro y quiebre "
-        "medidos se quedan, y el Stuff+ sigue a ese aire. "
+        "medidos se quedan, y el Stuff+ y el Pitching+ siguen a ese aire. "
         "El jugador del equipo se busca por ID: 778 o pitcher_00778.</p>",
         unsafe_allow_html=True,
     )
@@ -2060,7 +2147,7 @@ def tab_comparador(
 
     partes = []
     if ids_equipo:
-        vivo = lanzamientos_en_escenario(ids_equipo, estadio, modelo, referencia)
+        vivo = lanzamientos_en_escenario(ids_equipo, estadio, modelo, referencia, pitching)
         partes.append(repertorio_organizacion(vivo, ids_equipo))
     for identificador in seleccionados:
         if identificador.startswith("recluta_"):
@@ -2082,6 +2169,9 @@ def tab_comparador(
                 st.caption(f"Jugador del equipo · {mano}")
             stuff = fila["stuff_promedio"]
             st.metric("Stuff+ promedio", "—" if not np.isfinite(stuff) else f"{stuff:.2f}")
+            pitching_valor = fila["pitching_promedio"] if "pitching_promedio" in resumen.columns else float("nan")
+            if np.isfinite(pitching_valor):
+                st.metric("Pitching+", f"{pitching_valor:.1f}")
             lanzamientos = int(fila["lanzamientos"])
             st.metric("Lanzamientos", "—" if lanzamientos == 0 else f"{lanzamientos:,}")
             st.metric("Tipos de pitcheo", int(fila["tipos"]))
@@ -2100,12 +2190,14 @@ def tab_comparador(
             "spin": "Spin",
             "tipos": "Tipos",
             "mano": "Mano",
+            "pitching_promedio": "Pitching+",
         }
     )
     tabla["Origen"] = tabla["Pitcher"].map(lambda valor: "Recluta" if str(valor).startswith("recluta_") else "Equipo")
     tabla["Pitcher"] = tabla["Pitcher"].map(lambda valor: etiquetas.get(valor, valor))
     tabla["Mano"] = tabla["Mano"].map(lambda valor: "Derecha" if valor == "Right" else "Izquierda" if valor == "Left" else valor)
-    tabla = tabla[["Pitcher", "Origen", "Mano", "Lanzamientos", "Stuff+ promedio", "Stuff+ mediano", "Stuff+ máximo", "Velocidad", "Spin", "Tipos"]]
+    columnas_tabla = ["Pitcher", "Origen", "Mano", "Lanzamientos", "Stuff+ promedio", "Stuff+ mediano", "Stuff+ máximo", "Pitching+", "Velocidad", "Spin", "Tipos"]
+    tabla = tabla[[columna for columna in columnas_tabla if columna in tabla.columns]]
     st.dataframe(
         tabla,
         hide_index=True,
@@ -2115,6 +2207,7 @@ def tab_comparador(
             "Stuff+ promedio": st.column_config.NumberColumn(format="%.2f"),
             "Stuff+ mediano": st.column_config.NumberColumn(format="%.2f"),
             "Stuff+ máximo": st.column_config.NumberColumn(format="%.2f"),
+            "Pitching+": st.column_config.NumberColumn(format="%.1f"),
             "Velocidad": st.column_config.NumberColumn(format="%.2f mph"),
             "Spin": st.column_config.NumberColumn(format="%.0f rpm"),
             "Tipos": st.column_config.NumberColumn(format="%d"),
@@ -2149,6 +2242,7 @@ def tab_comparador(
                     "Spin": bloque["spin"].to_numpy(),
                     "IVB": bloque["ivb"].to_numpy(),
                     "HorzBreak": bloque["hb"].to_numpy(),
+                    "Pitching+": bloque["pitching_promedio"].to_numpy() if "pitching_promedio" in bloque.columns else np.nan,
                 }
             )
             st.dataframe(
@@ -2163,6 +2257,7 @@ def tab_comparador(
                     "Spin": st.column_config.NumberColumn(format="%.0f"),
                     "IVB": st.column_config.NumberColumn(format="%.2f"),
                     "HorzBreak": st.column_config.NumberColumn(format="%.2f"),
+                    "Pitching+": st.column_config.NumberColumn(format="%.1f"),
                 },
             )
             principal = bloque.iloc[0]
@@ -2206,7 +2301,7 @@ def tab_comparador(
         width="stretch",
     )
     st.caption(
-        "El Stuff+ del recluta y el del jugador del equipo salen del mismo modelo, "
+        "Stuff+ y Pitching+ del recluta y del jugador del equipo salen del modelo del notebook, "
         "con el aire del estadio del escenario. Velocidad, giro y quiebre medidos se quedan iguales."
     )
 
@@ -2251,21 +2346,28 @@ def main():
             list(ALTITUDES),
             format_func=lambda valor: ALTITUDES[valor],
             key="estadio_escenario",
-            help="Al cambiar el estadio se recalculan el Stuff+ y el Location+ de los reclutas, "
-            "y el Stuff+ de los jugadores del equipo en Pitchers. "
+            help="Al cambiar el estadio se recalculan Stuff+, Location+ y Pitching+. "
             "Velocidad, giro, quiebre y ubicación medidos se quedan iguales.",
         )
+        st.selectbox(
+            "Outs en el escenario",
+            [0, 1, 2],
+            key="outs_escenario",
+            help="El Pitching+ del recluta usa estos outs, junto con la cuenta de cada pitcheo. "
+            "El jugador del equipo conserva los outs de cada lanzamiento de su historial.",
+        )
         st.caption(
-            "El estadio es en vivo para los reclutas y para los jugadores del equipo en Pitchers."
+            "El estadio y los outs son en vivo. En Pitchers, el jugador del equipo también cambia con el aire."
         )
         if st.button("Limpiar este repertorio", disabled=not repertorio_en_edicion()):
             st.session_state.reclutas[st.session_state.activo]["repertorio"] = []
             st.rerun()
 
     try:
-        with st.spinner("Cargando el roster y el Stuff+ de la organización..."):
+        with st.spinner("Cargando el roster y el modelo de la organización..."):
             modelo = cargar_modelo()
             referencia = cargar_referencia()
+            pitching = cargar_pitching(entrenar_si_falta=False)
     except FileNotFoundError as exc:
         st.error(str(exc))
         return
@@ -2284,15 +2386,16 @@ def main():
             <p class="marca">DRITAM · Diablos Rojos</p>
             <h1>{html.escape(titulo)}</h1>
             <p class="bajada">Captura dos prospectos y compáralos entre sí y con los pitchers reales
-            de la organización. En Stuff+ y en Location+, 100 es el promedio de ese tipo de lanzamiento.</p>
+            de la organización. En Stuff+, Location+ y Pitching+, 100 es el promedio.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     estadio = st.session_state.get("estadio_escenario", ESTADIO_DEFAULT)
-    vista_a = repertorio_en_escenario(st.session_state.reclutas["a"]["repertorio"], estadio, modelo)
-    vista_b = repertorio_en_escenario(st.session_state.reclutas["b"]["repertorio"], estadio, modelo)
+    outs = int(st.session_state.get("outs_escenario", 0))
+    vista_a = repertorio_en_escenario(st.session_state.reclutas["a"]["repertorio"], estadio, modelo, pitching, outs)
+    vista_b = repertorio_en_escenario(st.session_state.reclutas["b"]["repertorio"], estadio, modelo, pitching, outs)
     vista = vista_a if st.session_state.activo == "a" else vista_b
 
     captura, comparacion, decision, duelo, pitchers = st.tabs(
@@ -2303,11 +2406,11 @@ def main():
     with comparacion:
         tab_comparacion(modelo, referencia, minimo, vista)
     with decision:
-        tab_decision(modelo, referencia, minimo, vista)
+        tab_decision(modelo, referencia, minimo, vista, pitching)
     with duelo:
         tab_duelo(referencia, minimo, vista_a, vista_b)
     with pitchers:
-        tab_comparador(referencia, vista_a, vista_b, estadio, modelo)
+        tab_comparador(referencia, vista_a, vista_b, estadio, modelo, pitching)
 
 
 if __name__ == "__main__":
