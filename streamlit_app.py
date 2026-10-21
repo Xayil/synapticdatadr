@@ -1849,11 +1849,64 @@ def repertorio_organizacion(referencia: pd.DataFrame, seleccionados: list[str]) 
     return repertorio
 
 
+def repertorio_recluta(vista: list[dict], identificador: str) -> pd.DataFrame:
+    """El reporte capturado, en el mismo formato que el repertorio de un pitcher del equipo."""
+    grupos: dict[str, list[dict]] = {}
+    orden: list[str] = []
+    for fila in vista:
+        tipo = fila["AutoPitchType"]
+        if tipo not in grupos:
+            orden.append(tipo)
+            grupos[tipo] = []
+        grupos[tipo].append(fila)
+    filas = []
+    for tipo in orden:
+        bloque = grupos[tipo]
+        usos = np.array([float(fila.get("uso_pct") or 0) for fila in bloque], dtype=float)
+        cuentas = np.array([float(fila.get("n_lanzamientos") or 0) for fila in bloque], dtype=float)
+        if np.nansum(usos) > 0:
+            pesos = usos
+        elif np.nansum(cuentas) > 0:
+            pesos = cuentas
+        else:
+            pesos = np.ones(len(bloque))
+        manos = [fila.get("PitcherThrows") for fila in bloque if fila.get("PitcherThrows")]
+        filas.append(
+            {
+                "pitcher_anon_id": identificador,
+                "AutoPitchType": tipo,
+                "lanzamientos": int(np.nansum(cuentas)),
+                "stuff_promedio": _promedio_ponderado([fila["stuff_plus"] for fila in bloque], pesos),
+                "velocidad": _promedio_ponderado([fila["RelSpeed"] for fila in bloque], pesos),
+                "spin": _promedio_ponderado([fila["SpinRate"] for fila in bloque], pesos),
+                "ivb": _promedio_ponderado([fila["InducedVertBreak"] for fila in bloque], pesos),
+                "hb": _promedio_ponderado([fila["HorzBreak"] for fila in bloque], pesos),
+                "mano": manos[0] if manos else "",
+                "uso_directo": float(np.nansum(usos)),
+            }
+        )
+    repertorio = pd.DataFrame(filas)
+    if repertorio.empty:
+        return repertorio
+    if repertorio["uso_directo"].sum() > 0:
+        repertorio["uso_%"] = repertorio["uso_directo"] / repertorio["uso_directo"].sum() * 100
+    elif repertorio["lanzamientos"].sum() > 0:
+        repertorio["uso_%"] = repertorio["lanzamientos"] / repertorio["lanzamientos"].sum() * 100
+    else:
+        repertorio["uso_%"] = 100 / len(repertorio)
+    return repertorio.drop(columns=["uso_directo"])
+
+
 def resumen_organizacion(repertorio: pd.DataFrame, seleccionados: list[str]) -> pd.DataFrame:
     filas = []
     for pitcher in seleccionados:
         bloque = repertorio[repertorio["pitcher_anon_id"] == pitcher]
-        pesos = bloque["lanzamientos"] if not bloque.empty else []
+        if bloque.empty:
+            pesos = []
+        elif float(bloque["lanzamientos"].sum()) > 0:
+            pesos = bloque["lanzamientos"]
+        else:
+            pesos = bloque["uso_%"]
         manos = bloque["mano"].replace("", np.nan).dropna() if not bloque.empty else pd.Series(dtype=object)
         filas.append(
             {
@@ -1871,15 +1924,11 @@ def resumen_organizacion(repertorio: pd.DataFrame, seleccionados: list[str]) -> 
     return pd.DataFrame(filas).set_index("pitcher_anon_id").reindex(seleccionados)
 
 
-def _etiqueta_id(pitcher: str) -> str:
-    return pitcher.removeprefix("pitcher_")
-
-
-def figura_stuff_pitchers(resumen: pd.DataFrame, seleccionados: list[str]) -> go.Figure:
+def figura_stuff_pitchers(resumen: pd.DataFrame, seleccionados: list[str], etiquetas: dict[str, str]) -> go.Figure:
     figura = go.Figure(
         go.Bar(
             x=resumen.loc[seleccionados, "stuff_promedio"],
-            y=list(seleccionados),
+            y=[etiquetas.get(pitcher, pitcher) for pitcher in seleccionados],
             orientation="h",
             marker_color=[COLORES_PITCHER[i % len(COLORES_PITCHER)] for i in range(len(seleccionados))],
             hovertemplate="%{y}<br>Stuff+ %{x:.1f}<extra></extra>",
@@ -1891,17 +1940,25 @@ def figura_stuff_pitchers(resumen: pd.DataFrame, seleccionados: list[str]) -> go
     return estilo(figura, "Stuff+ promedio por pitcher")
 
 
-def figura_tipos_pitchers(repertorio: pd.DataFrame, seleccionados: list[str], columna: str, titulo: str, eje: str) -> go.Figure:
+def figura_tipos_pitchers(
+    repertorio: pd.DataFrame,
+    seleccionados: list[str],
+    columna: str,
+    titulo: str,
+    eje: str,
+    etiquetas: dict[str, str],
+) -> go.Figure:
     figura = go.Figure()
     for indice, pitcher in enumerate(seleccionados):
         bloque = repertorio[repertorio["pitcher_anon_id"] == pitcher]
+        nombre = etiquetas.get(pitcher, pitcher)
         figura.add_trace(
             go.Bar(
-                name=_etiqueta_id(pitcher),
+                name=nombre,
                 x=[ETIQUETAS_TIPO.get(tipo, tipo) for tipo in bloque["AutoPitchType"]],
                 y=bloque[columna],
                 marker_color=COLORES_PITCHER[indice % len(COLORES_PITCHER)],
-                hovertemplate="%{x}<br>" + _etiqueta_id(pitcher) + "<br>%{y:.1f}<extra></extra>",
+                hovertemplate="%{x}<br>" + nombre + "<br>%{y:.1f}<extra></extra>",
             )
         )
     figura.update_layout(barmode="group")
@@ -1927,15 +1984,22 @@ def figura_arsenal(bloque: pd.DataFrame, columna: str, titulo: str, color: str) 
     return estilo(figura, titulo)
 
 
-def tab_comparador(referencia: pd.DataFrame):
-    """Comparación de 1 a 4 pitchers de la organización, como src/comparador_pitchers.py."""
+def tab_comparador(referencia: pd.DataFrame, vista_a: list[dict], vista_b: list[dict]):
+    """De uno a cuatro lugares: cada uno puede ser un recluta o un pitcher del equipo."""
+    vistas = {"a": vista_a, "b": vista_b}
     st.subheader("Comparador de pitchers")
     st.markdown(
-        '<p class="nota">Elige de uno a cuatro pitchers de la organización por su ID. '
-        "Puedes escribir 778 o pitcher_00778. El Stuff+ es el mismo del resto del dashboard: "
-        "el promedio de cada tipo de lanzamiento, ponderado por cuántos lanzamientos tiene.</p>",
+        '<p class="nota">Cada lugar puede ser un recluta o un jugador del equipo. '
+        "El recluta entra con el repertorio capturado y con el aire del estadio del escenario. "
+        "El jugador del equipo se busca por ID: 778 o pitcher_00778. "
+        "El Stuff+ de los dos lados es el del mismo modelo.</p>",
         unsafe_allow_html=True,
     )
+
+    def etiqueta_origen(valor: str) -> str:
+        if valor == "equipo":
+            return "Jugador del equipo"
+        return f"Recluta · {nombre_visible(valor)}"
 
     cantidad = st.selectbox(
         "Número de pitchers a comparar",
@@ -1945,29 +2009,55 @@ def tab_comparador(referencia: pd.DataFrame):
     )
     columnas = st.columns(cantidad)
     seleccionados = []
+    etiquetas = {}
     for indice in range(cantidad):
-        llave = f"pitcher_org_{indice}"
-        if llave not in st.session_state:
-            st.session_state[llave] = EJEMPLOS_PITCHER[indice]
+        llave_origen = f"origen_comp_{indice}"
+        llave_id = f"pitcher_org_{indice}"
+        if llave_origen not in st.session_state:
+            st.session_state[llave_origen] = "a" if indice == 0 else "equipo"
+        if llave_id not in st.session_state:
+            st.session_state[llave_id] = EJEMPLOS_PITCHER[indice]
         with columnas[indice]:
-            valor = st.text_input(f"Pitcher {indice + 1}", key=llave, placeholder="00778")
-        if valor.strip():
-            seleccionados.append(identificador_pitcher(valor))
+            origen = st.selectbox(
+                f"Lugar {indice + 1}",
+                ["a", "b", "equipo"],
+                format_func=etiqueta_origen,
+                key=llave_origen,
+            )
+            if origen == "equipo":
+                valor = st.text_input("ID del jugador", key=llave_id, placeholder="00778")
+                if valor.strip():
+                    identificador = identificador_pitcher(valor)
+                    seleccionados.append(identificador)
+                    etiquetas[identificador] = identificador
+            elif not vistas[origen]:
+                st.caption(f"{nombre_visible(origen)} todavía no tiene pitcheos. Cárgalos en Captura.")
+            else:
+                identificador = f"recluta_{origen}"
+                seleccionados.append(identificador)
+                etiquetas[identificador] = nombre_visible(origen)
 
     if not seleccionados:
-        st.info("Ingresa al menos un ID.")
+        st.info("Elige un recluta con repertorio o escribe el ID de un jugador del equipo.")
         return
     if len(seleccionados) != len(set(seleccionados)):
-        st.warning("No repitas el mismo pitcher.")
+        st.warning("No repitas el mismo recluta ni el mismo jugador.")
         return
 
+    ids_equipo = [pitcher for pitcher in seleccionados if not pitcher.startswith("recluta_")]
     disponibles = set(referencia["pitcher_anon_id"].dropna().unique())
-    no_encontrados = [pitcher for pitcher in seleccionados if pitcher not in disponibles]
+    no_encontrados = [pitcher for pitcher in ids_equipo if pitcher not in disponibles]
     if no_encontrados:
         st.error("Pitchers sin Stuff+ disponible: " + ", ".join(no_encontrados))
         return
 
-    repertorio = repertorio_organizacion(referencia, seleccionados)
+    partes = []
+    if ids_equipo:
+        partes.append(repertorio_organizacion(referencia, ids_equipo))
+    for identificador in seleccionados:
+        if identificador.startswith("recluta_"):
+            partes.append(repertorio_recluta(vistas[identificador.removeprefix("recluta_")], identificador))
+    repertorio = pd.concat([parte for parte in partes if not parte.empty], ignore_index=True)
     resumen = resumen_organizacion(repertorio, seleccionados)
 
     st.markdown("### Comparación general")
@@ -1975,15 +2065,20 @@ def tab_comparador(referencia: pd.DataFrame):
     for indice, pitcher in enumerate(seleccionados):
         fila = resumen.loc[pitcher]
         mano = ETIQUETAS_MANO.get(fila["mano"], fila["mano"])
+        es_recluta = pitcher.startswith("recluta_")
         with tarjetas[indice]:
-            st.markdown(f"**{html.escape(pitcher)}**")
-            if mano:
-                st.caption(f"Pitcher {mano}")
-            st.metric("Stuff+ promedio", f"{fila['stuff_promedio']:.2f}")
-            st.metric("Lanzamientos", f"{int(fila['lanzamientos']):,}")
+            st.markdown(f"**{html.escape(etiquetas.get(pitcher, pitcher))}**")
+            if es_recluta and mano:
+                st.caption(f"Recluta {mano}")
+            elif mano:
+                st.caption(f"Jugador del equipo · {mano}")
+            stuff = fila["stuff_promedio"]
+            st.metric("Stuff+ promedio", "—" if not np.isfinite(stuff) else f"{stuff:.2f}")
+            lanzamientos = int(fila["lanzamientos"])
+            st.metric("Lanzamientos", "—" if lanzamientos == 0 else f"{lanzamientos:,}")
             st.metric("Tipos de pitcheo", int(fila["tipos"]))
 
-    st.plotly_chart(figura_stuff_pitchers(resumen, seleccionados), width="stretch")
+    st.plotly_chart(figura_stuff_pitchers(resumen, seleccionados, etiquetas), width="stretch")
 
     st.markdown("### Estadísticas comparativas")
     tabla = resumen.reset_index().rename(
@@ -1999,7 +2094,10 @@ def tab_comparador(referencia: pd.DataFrame):
             "mano": "Mano",
         }
     )
+    tabla["Origen"] = tabla["Pitcher"].map(lambda valor: "Recluta" if str(valor).startswith("recluta_") else "Equipo")
+    tabla["Pitcher"] = tabla["Pitcher"].map(lambda valor: etiquetas.get(valor, valor))
     tabla["Mano"] = tabla["Mano"].map(lambda valor: "Derecha" if valor == "Right" else "Izquierda" if valor == "Left" else valor)
+    tabla = tabla[["Pitcher", "Origen", "Mano", "Lanzamientos", "Stuff+ promedio", "Stuff+ mediano", "Stuff+ máximo", "Velocidad", "Spin", "Tipos"]]
     st.dataframe(
         tabla,
         hide_index=True,
@@ -2017,15 +2115,17 @@ def tab_comparador(referencia: pd.DataFrame):
 
     st.markdown("### Comparación de repertorios")
     st.plotly_chart(
-        figura_tipos_pitchers(repertorio, seleccionados, "stuff_promedio", "Stuff+ por tipo de lanzamiento", "Stuff+"),
+        figura_tipos_pitchers(repertorio, seleccionados, "stuff_promedio", "Stuff+ por tipo de lanzamiento", "Stuff+", etiquetas),
         width="stretch",
     )
 
     st.markdown("#### Análisis individual del repertorio")
     for indice, pitcher in enumerate(seleccionados):
-        bloque = repertorio[repertorio["pitcher_anon_id"] == pitcher].sort_values("lanzamientos", ascending=False)
+        bloque = repertorio[repertorio["pitcher_anon_id"] == pitcher].sort_values(
+            ["lanzamientos", "uso_%"], ascending=False
+        )
         color = COLORES_PITCHER[indice % len(COLORES_PITCHER)]
-        with st.expander(f"{pitcher} — Análisis completo", expanded=True):
+        with st.expander(f"{etiquetas.get(pitcher, pitcher)} — Análisis completo", expanded=True):
             st.markdown("##### Composición del arsenal")
             st.plotly_chart(figura_arsenal(bloque, "uso_%", "Uso del arsenal (%)", color), width="stretch")
             st.markdown("##### Calidad de cada lanzamiento")
@@ -2062,18 +2162,24 @@ def tab_comparador(referencia: pd.DataFrame):
                 f"Lanzamiento principal: {ETIQUETAS_TIPO.get(principal['AutoPitchType'], principal['AutoPitchType'])} | "
                 f"Uso: {principal['uso_%']:.1f}% | Stuff+: {principal['stuff_promedio']:.2f}"
             )
-            evaluables = bloque[bloque["lanzamientos"] >= 30]
-            if not evaluables.empty:
-                mejor = evaluables.loc[evaluables["stuff_promedio"].idxmax()]
-                st.success(
-                    f"Mayor Stuff+ entre lanzamientos con al menos 30 observaciones: "
-                    f"{ETIQUETAS_TIPO.get(mejor['AutoPitchType'], mejor['AutoPitchType'])} ({mejor['stuff_promedio']:.2f})"
+            if int(bloque["lanzamientos"].sum()) == 0:
+                st.info(
+                    "Este repertorio no trae conteo de lanzamientos. "
+                    "El Stuff+ y el uso son los del reporte capturado."
                 )
-            pocos = bloque[bloque["lanzamientos"] < 30]
-            if not pocos.empty:
-                st.warning(
-                    "Algunos tipos tienen menos de 30 lanzamientos. Sus promedios deben interpretarse con cautela."
-                )
+            else:
+                evaluables = bloque[bloque["lanzamientos"] >= 30]
+                if not evaluables.empty:
+                    mejor = evaluables.loc[evaluables["stuff_promedio"].idxmax()]
+                    st.success(
+                        f"Mayor Stuff+ entre lanzamientos con al menos 30 observaciones: "
+                        f"{ETIQUETAS_TIPO.get(mejor['AutoPitchType'], mejor['AutoPitchType'])} ({mejor['stuff_promedio']:.2f})"
+                    )
+                pocos = bloque[bloque["lanzamientos"] < 30]
+                if not pocos.empty:
+                    st.warning(
+                        "Algunos tipos tienen menos de 30 lanzamientos. Sus promedios deben interpretarse con cautela."
+                    )
 
     st.markdown("### Comparación directa por tipo de pitcheo")
     comparacion = repertorio.pivot_table(
@@ -2083,17 +2189,17 @@ def tab_comparador(referencia: pd.DataFrame):
         observed=True,
     ).reindex(columns=seleccionados)
     comparacion.index = [ETIQUETAS_TIPO.get(tipo, tipo) for tipo in comparacion.index]
-    comparacion.columns = [_etiqueta_id(pitcher) for pitcher in comparacion.columns]
+    comparacion.columns = [etiquetas.get(pitcher, pitcher) for pitcher in comparacion.columns]
     st.dataframe(comparacion.round(2), width="stretch")
 
     st.markdown("### Comparación de utilización")
     st.plotly_chart(
-        figura_tipos_pitchers(repertorio, seleccionados, "uso_%", "Uso de cada tipo (%)", "Uso %"),
+        figura_tipos_pitchers(repertorio, seleccionados, "uso_%", "Uso de cada tipo (%)", "Uso %", etiquetas),
         width="stretch",
     )
     st.caption(
         "Las puntuaciones Stuff+ provienen del modelo del dashboard. "
-        "Este comparador agrupa a los pitchers de la organización y no modifica el modelo ni sus parámetros."
+        "El recluta usa el aire del estadio del escenario. El jugador del equipo conserva el Stuff+ de su historial."
     )
 
 
@@ -2192,7 +2298,7 @@ def main():
     with duelo:
         tab_duelo(referencia, minimo, vista_a, vista_b)
     with pitchers:
-        tab_comparador(referencia)
+        tab_comparador(referencia, vista_a, vista_b)
 
 
 if __name__ == "__main__":
