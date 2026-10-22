@@ -1,1 +1,6 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+venv/
 database/stuff_model_df.parquet
