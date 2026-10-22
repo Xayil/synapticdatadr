@@ -16,7 +16,7 @@ Sigue estos pasos en tu terminal (**PowerShell** o Git Bash) dentro de la carpet
 
 ### 1. Clonar el repositorio y entrar a la carpeta
 ```powershell
-git clone <URL_DE_TU_REPOSOTORIO>
+git clone
 cd synapticdatadr
 
 # Crear el entorno virtual
