@@ -13,6 +13,7 @@ import re
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from reclutamiento.comparacion import (
@@ -36,6 +37,7 @@ from reclutamiento.fisica import (
     tilt_a_spin_axis,
 )
 from reclutamiento.location_plus import grilla_location
+from src.plots import ZONA_STRIKE, color_de
 from reclutamiento.pitching_plus import (
     cargar_pitching,
     puntuar_pitching,
@@ -2071,6 +2073,113 @@ def figura_arsenal(bloque: pd.DataFrame, columna: str, titulo: str, color: str) 
     return estilo(figura, titulo)
 
 
+def figura_zonas_pitchers(
+    puntos: pd.DataFrame,
+    seleccionados: list[str],
+    etiquetas: dict[str, str],
+) -> go.Figure:
+    """Zona de strike con un punto por lanzamiento, el mismo recuadro que src/plots.py."""
+    figura = make_subplots(
+        rows=1,
+        cols=len(seleccionados),
+        subplot_titles=[etiquetas.get(pitcher, pitcher) for pitcher in seleccionados],
+        shared_yaxes=True,
+        horizontal_spacing=0.05,
+    )
+    vistos: set[str] = set()
+    for columna, pitcher in enumerate(seleccionados, start=1):
+        figura.add_shape(
+            type="rect",
+            x0=ZONA_STRIKE["x0"],
+            x1=ZONA_STRIKE["x1"],
+            y0=ZONA_STRIKE["y0"],
+            y1=ZONA_STRIKE["y1"],
+            line=dict(color=TINTA, width=2, dash="dash"),
+            fillcolor="rgba(28, 25, 23, 0.04)",
+            row=1,
+            col=columna,
+        )
+        bloque = puntos[puntos["pitcher_anon_id"] == pitcher] if not puntos.empty else puntos
+        if not bloque.empty:
+            presentes = set(bloque["AutoPitchType"].dropna().astype(str))
+            orden = [tipo for tipo in TIPOS_MODELO if tipo in presentes]
+            orden += sorted(presentes - set(orden))
+            for tipo in orden:
+                grupo = bloque[bloque["AutoPitchType"].astype(str) == tipo]
+                nombre = ETIQUETAS_TIPO.get(tipo, tipo)
+                figura.add_trace(
+                    go.Scatter(
+                        x=grupo["PlateLocSide"],
+                        y=grupo["PlateLocHeight"],
+                        mode="markers",
+                        name=nombre,
+                        legendgroup=tipo,
+                        showlegend=tipo not in vistos,
+                        marker=dict(size=9, opacity=0.8, color=color_de(tipo)),
+                        hovertemplate=(
+                            f"<b>{nombre}</b><br>"
+                            "Lado %{x:.2f} ft<br>"
+                            "Altura %{y:.2f} ft<extra></extra>"
+                        ),
+                    ),
+                    row=1,
+                    col=columna,
+                )
+                vistos.add(tipo)
+        figura.update_xaxes(
+            title_text="Ubicación horizontal (ft)",
+            range=[-2.5, 2.5],
+            zeroline=False,
+            showgrid=True,
+            gridcolor="#EFEAE3",
+            row=1,
+            col=columna,
+        )
+        figura.update_yaxes(
+            title_text="Ubicación vertical (ft)" if columna == 1 else "",
+            range=[0, 5],
+            zeroline=False,
+            showgrid=True,
+            gridcolor="#EFEAE3",
+            row=1,
+            col=columna,
+        )
+    figura.update_layout(
+        height=540,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Segoe UI, sans-serif", color=TINTA, size=13),
+        legend=dict(title=dict(text="Tipo de lanzamiento"), orientation="h", y=-0.22),
+        margin=dict(l=10, r=10, t=48, b=80),
+    )
+    return figura
+
+
+def _puntos_zona(vista: list[dict], identificador: str) -> pd.DataFrame:
+    filas = []
+    for fila in vista:
+        lado = fila.get("PlateLocSide")
+        altura = fila.get("PlateLocHeight")
+        if lado is None or altura is None:
+            continue
+        try:
+            lado_f = float(lado)
+            altura_f = float(altura)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(lado_f) or not np.isfinite(altura_f):
+            continue
+        filas.append(
+            {
+                "pitcher_anon_id": identificador,
+                "AutoPitchType": fila["AutoPitchType"],
+                "PlateLocSide": lado_f,
+                "PlateLocHeight": altura_f,
+            }
+        )
+    return pd.DataFrame(filas)
+
+
 def tab_comparador(
     referencia: pd.DataFrame,
     vista_a: list[dict],
@@ -2146,6 +2255,7 @@ def tab_comparador(
         return
 
     partes = []
+    vivo = pd.DataFrame()
     if ids_equipo:
         vivo = lanzamientos_en_escenario(ids_equipo, estadio, modelo, referencia, pitching)
         partes.append(repertorio_organizacion(vivo, ids_equipo))
@@ -2177,6 +2287,30 @@ def tab_comparador(
             st.metric("Tipos de pitcheo", int(fila["tipos"]))
 
     st.plotly_chart(figura_stuff_pitchers(resumen, seleccionados, etiquetas), width="stretch")
+
+    st.markdown("### Zona de strike")
+    st.markdown(
+        '<p class="nota">Cada punto es un lanzamiento y el color es su tipo. '
+        "El recuadro punteado es la zona de strike, vista del receptor. "
+        "El jugador del equipo muestra cada uno de sus lanzamientos. "
+        "El recluta muestra la ubicación capturada de cada tipo.</p>",
+        unsafe_allow_html=True,
+    )
+    trozos = []
+    if not vivo.empty and {"PlateLocSide", "PlateLocHeight", "AutoPitchType", "pitcher_anon_id"} <= set(vivo.columns):
+        trozos.append(vivo[["pitcher_anon_id", "AutoPitchType", "PlateLocSide", "PlateLocHeight"]])
+    for identificador in seleccionados:
+        if identificador.startswith("recluta_"):
+            capturado = _puntos_zona(vistas[identificador.removeprefix("recluta_")], identificador)
+            if not capturado.empty:
+                trozos.append(capturado)
+    puntos = (
+        pd.concat(trozos, ignore_index=True)
+        if trozos
+        else pd.DataFrame(columns=["pitcher_anon_id", "AutoPitchType", "PlateLocSide", "PlateLocHeight"])
+    )
+    puntos = puntos.dropna(subset=["PlateLocSide", "PlateLocHeight"])
+    st.plotly_chart(figura_zonas_pitchers(puntos, seleccionados, etiquetas), width="stretch")
 
     st.markdown("### Estadísticas comparativas")
     tabla = resumen.reset_index().rename(

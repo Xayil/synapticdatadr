@@ -433,6 +433,8 @@ _COLUMNAS_ESCENARIO = [
     "HorzBreak",
     "n_lanzamientos",
     "stuff_plus",
+    "PlateLocSide",
+    "PlateLocHeight",
 ]
 
 
